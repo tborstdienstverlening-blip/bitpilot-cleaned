@@ -1,18 +1,28 @@
-# import_export.py — minimal CSV helpers
-from __future__ import annotations
+# import_export.py — tolerant CSV IO
 from pathlib import Path
 import pandas as pd
+from schema import REQUIRED_ORDER
 
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
+CSV = Path("data") / "journal_entries.csv"
 
-def read_csv(path: str | Path) -> pd.DataFrame:
-    p = Path(path)
-    if not p.exists():
-        return pd.DataFrame()
-    return pd.read_csv(p)
+def ensure_csv():
+    CSV.parent.mkdir(parents=True, exist_ok=True)
+    if not CSV.exists():
+        pd.DataFrame(columns=REQUIRED_ORDER).to_csv(CSV, index=False)
 
-def write_csv(df: pd.DataFrame, path: str | Path) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(p, index=False)
+def read_entries() -> pd.DataFrame:
+    ensure_csv()
+    try:
+        df = pd.read_csv(CSV)
+    except Exception:
+        df = pd.DataFrame(columns=REQUIRED_ORDER)
+    for c in REQUIRED_ORDER:
+        if c not in df.columns:
+            df[c] = ""
+    return df[REQUIRED_ORDER]
+
+def write_entries(df: pd.DataFrame) -> None:
+    if df is None or df.empty:
+        pd.DataFrame(columns=REQUIRED_ORDER).to_csv(CSV, index=False)
+    else:
+        df[REQUIRED_ORDER].to_csv(CSV, index=False)
