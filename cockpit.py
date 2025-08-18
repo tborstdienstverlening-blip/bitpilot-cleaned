@@ -92,7 +92,8 @@ with tab_journal:
             d_notes = st.text_area(COL["NOTES"], key="add_notes")
             d_shots = st.text_input(COL["SHOTS"], key="add_shots")
 
-        save_btn = st.form_submit_button("Opslaan", use_container_width=True, type="primary", key="save_btn")
+        # BELANGRIJK: form_submit_button heeft GEEN 'key' argument
+        save_btn = st.form_submit_button("Opslaan", use_container_width=True, type="primary")
 
     if save_btn:
         setup_value = d_custom.strip() if (d_setup == "Anders/Custom" and d_custom) else d_setup
