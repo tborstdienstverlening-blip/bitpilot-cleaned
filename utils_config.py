@@ -7,10 +7,12 @@ ROOT = Path.cwd()
 CFG = ROOT / "config.json"
 
 try:
-    import tomllib as _toml  # Python 3.11+
+    import tomllib as _toml        # Python 3.11+
 except Exception:
-    _toml = None
-CFG_TOML = ROOT / "config.toml"
+    try:
+        import tomli as _toml      # Python <= 3.10
+    except Exception:
+        _toml = None
 
 _default = {
     "theme": {
