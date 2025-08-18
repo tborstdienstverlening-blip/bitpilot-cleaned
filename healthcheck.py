@@ -23,7 +23,8 @@ def report() -> dict:
         "time": datetime.utcnow().isoformat() + "Z",
         "python": sys.version.split()[0],
         "platform": platform.platform(),
-        "dirs_ok": all(d.exists() for d in NEELED_DIRS(cfg)) if False else all(d.exists() for d in NEEDED_DIRS(cfg)),
-        "start_kapitaal": cfg.get("START_KAPITAAL", 0),
+        "dirs_ok": all(d.exists() for d in NEEDED_DIRS(cfg)),
+        "start_kapitaal": cfg.get("START_KAPITAAL", 1000),
         "ai": {"online": ai_online, "reason": ai_reason},
     }
+
