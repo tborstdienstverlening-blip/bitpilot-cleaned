@@ -1,0 +1,3 @@
+Datum,Trade_ID,Setup_type,Strategie,Gebruikte_TFs,Plan,Entry,Stoploss,Risk_%,R_inzet,TP1,TP2,TP3,Uitkomst,RR_realized,Plantrouw,Emoties,Tags,Notities,Status,Screenshot_1,Screenshot_2,Screenshot_3,Screenshot_4,Screenshot_5,Screenshot_6,Resultaat_PnL,ROI_% (simpel)
+2025-07-01,T-001,Breakout,HTF Pullback,H4,M15,plan A,100,95,1,0.5,110,0,0,W,1.2,90,rustig,trend;breakout,prima,Gesloten,,,,,,,50,
+2025-07-03,T-002,Reversal,Demand Sweep,H1,M5,plan B,120,115,0.5,0.25,130,0,0,L,-0.4,60,twijfel,reversal;liquidity,te vroeg,Gesloten,,,,,,,-20,

@@ -1,0 +1,7 @@
+START_CAPITAL = 10000.0
+[model]
+default='gpt-4o-mini'
+heavy='gpt-5-thinking'
+embeddings='text-embedding'
+[budget]
+month_usd=15
