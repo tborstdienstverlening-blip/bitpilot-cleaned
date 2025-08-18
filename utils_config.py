@@ -25,7 +25,7 @@ def load_config():
         pass
 
     # env overschrijft toml; anders defaults
-    cfg["START_KAPITAAL"] = int(os.getenv("START_KAPITAAL", cfg.get("START_KAPITAAL", 0)))
+    cfg["START_KAPITAAL"] = int(os.getenv("START_KAPITAAL", cfg.get("START_KAPITAAL", 1000)))
     cfg["DATA_DIR"]   = os.getenv("BITPILOT_DATA_DIR",   cfg.get("DATA_DIR", "data"))
     cfg["EXPORT_DIR"] = os.getenv("BITPILOT_EXPORT_DIR", cfg.get("EXPORT_DIR", "data/export"))
     cfg["SHOTS_DIR"]  = os.getenv("BITPILOT_SHOTS_DIR",  cfg.get("SHOTS_DIR", "resources/screens"))
