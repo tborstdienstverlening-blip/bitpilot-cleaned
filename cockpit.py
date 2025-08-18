@@ -6,7 +6,7 @@ from schema import COL, ORDER, DATE_FMT, SETUP_OPTS
 from import_export import read_entries, write_entries, export_visible
 from utils_config import load_config
 
-# veilige import van healthcheck (voorkomt NameError)
+# veilige import van healthcheck (voorkomt NameError als module ontbreekt)
 try:
     import healthcheck
 except Exception:
@@ -23,17 +23,18 @@ DEFAULTS = dict(
     f_tags="",
     f_emoties=[],
 )
+
 def reset_filters():
     for k, v in DEFAULTS.items():
         st.session_state[k] = v
 
 with st.sidebar:
     st.title("⚙️ Filters")
-    st.selectbox("Portefeuille", ["Alle","LT","Swing"], key="f_portefeuille")
-    st.selectbox("Periode", ["Alle","YTD","MTD","WTD"], key="f_periode")
-    st.multiselect("Categorie", ["BTC","Equities","FX","Commodities"], key="f_categorie")
+    st.selectbox("Portefeuille", ["Alle", "LT", "Swing"], key="f_portefeuille")
+    st.selectbox("Periode", ["Alle", "YTD", "MTD", "WTD"], key="f_periode")
+    st.multiselect("Categorie", ["BTC", "Equities", "FX", "Commodities"], key="f_categorie")
     st.text_input("🔖 Tags (comma)", key="f_tags")
-    st.multiselect("Emoties", ["Kalm","Twijfel","Stress"], key="f_emoties")
+    st.multiselect("Emoties", ["Kalm", "Twijfel", "Stress"], key="f_emoties")
     st.button("Reset filters", key="f_reset", on_click=reset_filters)
 
 # ---------- Header + Health ----------
@@ -41,13 +42,13 @@ st.title("📓 Journal — R0.2 Finishing (01/02)")
 if healthcheck and hasattr(healthcheck, "report"):
     rep = healthcheck.report()
     c0, c1, c2, c3 = st.columns(4)
-    c0.metric("Python", rep.get("python","?"))
+    c0.metric("Python", rep.get("python", "?"))
     c1.metric("Start_kapitaal", rep.get("start_kapitaal", 1000))
-    c2.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
+    c2.metric("AI", "Online" if rep.get("ai", {}).get("online") else rep.get("ai", {}).get("reason", "Offline"))
     c3.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
 
-# ---------- Tabs (Streamlit ondersteunt 1 key voor de tabs-container) ----------
-tab_journal, tab_ai, tab_events = st.tabs(["📓 Journal", "🤖 AI", "📅 Events"], key="tabs_main")
+# ---------- Tabs (LET OP: st.tabs heeft géén key-argument) ----------
+tab_journal, tab_ai, tab_events = st.tabs(["📓 Journal", "🤖 AI", "📅 Events"])
 
 with tab_journal:
     # Data
@@ -67,27 +68,27 @@ with tab_journal:
     # Toevoegen (alle widget keys vast)
     st.markdown("### ➕ Toevoegen")
     with st.form(key="add_form"):
-        c1,c2,c3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)
         with c1:
             d_datum = st.date_input(COL["DATUM"], key="add_datum")
-            d_id    = st.text_input(COL["TRADE_ID"], key="add_id")
+            d_id = st.text_input(COL["TRADE_ID"], key="add_id")
             d_setup = st.selectbox(COL["SETUP"], SETUP_OPTS, key="add_setup")
             d_custom = st.text_input("Eigen setup-naam", key="add_setup_custom") if d_setup == "Anders/Custom" else ""
-            d_tfs   = st.text_input(COL["TFS"], key="add_tfs")
+            d_tfs = st.text_input(COL["TFS"], key="add_tfs")
         with c2:
             d_entry = st.text_input(COL["ENTRY"], key="add_entry")
-            d_sl    = st.text_input(COL["SL"], key="add_sl")
-            d_tp    = st.text_input(COL["TP"], key="add_tp")
-            d_r     = st.number_input(COL["RISICO_R"], step=0.25, key="add_r")
-            d_win   = st.selectbox(COL["WIN"], ["","Win","Loss","BE"], key="add_win")
+            d_sl = st.text_input(COL["SL"], key="add_sl")
+            d_tp = st.text_input(COL["TP"], key="add_tp")
+            d_r = st.number_input(COL["RISICO_R"], step=0.25, key="add_r")
+            d_win = st.selectbox(COL["WIN"], ["", "Win", "Loss", "BE"], key="add_win")
         with c3:
-            d_pnl   = st.text_input(COL["PNL"], key="add_pnl")
-            d_roi   = st.text_input(COL["ROI"], key="add_roi")
-            d_fees  = st.text_input(COL["FEES"], key="add_fees")
-            d_acc   = st.text_input(COL["ACCOUNT"], key="add_acc")
-            d_tags  = st.text_input(COL["TAGS"], key="add_tags")
-            d_emo   = st.text_input(COL["EMOTIES"], key="add_emo")
-            d_plan  = st.text_area(COL["PLAN"], key="add_plan")
+            d_pnl = st.text_input(COL["PNL"], key="add_pnl")
+            d_roi = st.text_input(COL["ROI"], key="add_roi")
+            d_fees = st.text_input(COL["FEES"], key="add_fees")
+            d_acc = st.text_input(COL["ACCOUNT"], key="add_acc")
+            d_tags = st.text_input(COL["TAGS"], key="add_tags")
+            d_emo = st.text_input(COL["EMOTIES"], key="add_emo")
+            d_plan = st.text_area(COL["PLAN"], key="add_plan")
             d_notes = st.text_area(COL["NOTES"], key="add_notes")
             d_shots = st.text_input(COL["SHOTS"], key="add_shots")
 
