@@ -24,12 +24,13 @@ def load_config():
     except Exception:
         pass
 
+    # env overschrijft toml; anders defaults
     cfg["START_KAPITAAL"] = int(os.getenv("START_KAPITAAL", cfg.get("START_KAPITAAL", 0)))
     cfg["DATA_DIR"]   = os.getenv("BITPILOT_DATA_DIR",   cfg.get("DATA_DIR", "data"))
     cfg["EXPORT_DIR"] = os.getenv("BITPILOT_EXPORT_DIR", cfg.get("EXPORT_DIR", "data/export"))
     cfg["SHOTS_DIR"]  = os.getenv("BITPILOT_SHOTS_DIR",  cfg.get("SHOTS_DIR", "resources/screens"))
 
+    # mappen aanmaken (geen crash)
     for p in (cfg["DATA_DIR"], cfg["EXPORT_DIR"], cfg["SHOTS_DIR"]):
         Path(p).mkdir(parents=True, exist_ok=True)
     return cfg
-
