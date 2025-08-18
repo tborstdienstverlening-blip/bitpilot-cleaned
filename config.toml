@@ -1,7 +1,4 @@
-START_CAPITAL = 10000.0
-[model]
-default='gpt-4o-mini'
-heavy='gpt-5-thinking'
-embeddings='text-embedding'
-[budget]
-month_usd=15
+START_KAPITAAL = 0
+DATA_DIR = "data"
+EXPORT_DIR = "data/export"
+SHOTS_DIR = "resources/screens"

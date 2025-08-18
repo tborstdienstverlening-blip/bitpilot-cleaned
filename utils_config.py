@@ -1,69 +1,35 @@
-# utils_config.py
+# utils_config.py — config loader: config.toml -> .env -> defaults
 from __future__ import annotations
+import os
 from pathlib import Path
-import json
 
-ROOT = Path.cwd()
-CFG = ROOT / "config.json"
-
-try:
-    import tomllib as _toml        # Python 3.11+
-except Exception:
-    try:
-        import tomli as _toml      # Python <= 3.10
-    except Exception:
-        _toml = None
-
-_default = {
-    "theme": {
-        "mode": "auto",
-        "primary": "#1f6feb",
-        "badge": {"macro": "#3b82f6", "ok": "#10b981", "warn": "#f59e0b", "err": "#ef4444"},
-        "grey": {"muted": "#6b7280", "low": "#9ca3af", "med": "#6b7280", "high": "#374151"},
-    },
-    "paths": {"screens_base": "resources/screenshots", "snapshots": "data/snapshots"},
-    "backups": {"keep": 20},
-    "retrieval": {
-        "n_trades": 10,
-        "max_ctx_tokens": {"routine": 1500, "deep": 3500},
-        "userindex_weights": {"ta": 0.4, "live": 0.2, "post": 0.2, "notes": 0.2},
-    },
-    "models": {"routine": "gpt-4o-mini", "deep": "gpt-5-mini"},
-    "prices_per_1k": {},
-    "copilot": {
-        "plantrouw_min": 60,
-        "rr_min": 1.5,
-        "auto_monitor_interval_min": 30,
-        "max_ai_calls_per_session": 10,
-        "auto_preflight": True,
-        "public_price_feed": False,
-    },
-}
-
-def _deep_merge(d: dict, default: dict) -> dict:
-    for k, v in default.items():
-        if k not in d:
-            d[k] = v
-        elif isinstance(v, dict) and isinstance(d.get(k), dict):
-            _deep_merge(d[k], v)
-    return d
-
-def load_config() -> dict:
-    """Lees config.toml (indien aanwezig) + override met config.json, merge met defaults."""
-    data = {}
-    if CFG_TOML.exists() and _toml is not None:
+def _load_toml():
+    cfg = {}
+    if Path("config.toml").exists():
         try:
-            data = _toml.loads(CFG_TOML.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    if CFG.exists():
-        try:
-            j = json.loads(CFG.read_text(encoding="utf-8") or "{}")
-            if isinstance(j, dict):
-                data.update(j)
+            import tomllib  # py 3.11+
+            with open("config.toml","rb") as f: cfg.update(tomllib.load(f))
+        except ModuleNotFoundError:
+            import tomli
+            with open("config.toml","rb") as f: cfg.update(tomli.load(f))
         except Exception:
             pass
-    return _deep_merge(data, _default.copy())
+    return cfg
 
-def save_config(cfg: dict) -> None:
-    CFG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+def load_config():
+    cfg = _load_toml()
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
+    cfg["START_KAPITAAL"] = int(os.getenv("START_KAPITAAL", cfg.get("START_KAPITAAL", 0)))
+    cfg["DATA_DIR"]   = os.getenv("BITPILOT_DATA_DIR",   cfg.get("DATA_DIR", "data"))
+    cfg["EXPORT_DIR"] = os.getenv("BITPILOT_EXPORT_DIR", cfg.get("EXPORT_DIR", "data/export"))
+    cfg["SHOTS_DIR"]  = os.getenv("BITPILOT_SHOTS_DIR",  cfg.get("SHOTS_DIR", "resources/screens"))
+
+    for p in (cfg["DATA_DIR"], cfg["EXPORT_DIR"], cfg["SHOTS_DIR"]):
+        Path(p).mkdir(parents=True, exist_ok=True)
+    return cfg
+
