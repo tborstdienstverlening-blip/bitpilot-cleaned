@@ -29,7 +29,7 @@ def write_entries(df: pd.DataFrame):
         df[ORDER].to_csv(csv, index=False)
 
 def export_visible(df_visible: pd.DataFrame):
-    """Schrijf ALLE schema-kolommen weg, óók TFS, naar export/*.csv"""
+    """Alle schema-kolommen (incl. TFS) naar export/*.csv"""
     cfg = load_config()
     out = Path(cfg["EXPORT_DIR"]) / "journal_export.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
