@@ -1,4 +1,4 @@
-START_KAPITAAL = 0
+START_KAPITAAL = 1000
 DATA_DIR = "data"
 EXPORT_DIR = "data/export"
 SHOTS_DIR = "resources/screens"
