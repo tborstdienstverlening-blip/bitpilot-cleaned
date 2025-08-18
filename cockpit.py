@@ -25,6 +25,14 @@ with st.sidebar:
     st.button("Reset filters", key="f_reset", on_click=reset_filters)
 
 st.title("📓 Journal — Fundament R0.2-A")
+# Header + Healthcheck
+if hasattr(healthcheck, "report"):
+    rep = healthcheck.report()
+    c0, c1, c2, c3 = st.columns(4)
+    c0.metric("Python", rep.get("python", "?"))
+    c1.metric("Start_kapitaal", rep.get("start_kapitaal", 1000))
+    c2.metric("AI", "Online" if rep.get("ai", {}).get("online") else rep.get("ai", {}).get("reason", "Offline"))
+    c3.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
 
 # ---------- Data ----------
 df = read_entries()
