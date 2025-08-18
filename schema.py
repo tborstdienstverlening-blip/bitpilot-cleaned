@@ -1,4 +1,4 @@
-# schema.py — centrale bron (NL)
+# schema.py — ENIGE bron voor kolomnamen + volgorde (NL)
 COL = {
     "DATUM": "Datum",
     "TRADE_ID": "Trade_ID",
@@ -22,12 +22,12 @@ COL = {
 ORDER = [
     COL["DATUM"], COL["TRADE_ID"], COL["SETUP"], COL["TFS"], COL["ENTRY"], COL["SL"],
     COL["TP"], COL["RISICO_R"], COL["PNL"], COL["ROI"], COL["FEES"], COL["ACCOUNT"],
-    COL["WIN"], COL["TAGS"], COL["EMOTIES"], COL["PLAN"], COL["NOTES"], COL["SHOTS"]
+    COL["WIN"], COL["TAGS"], COL["EMOTIES"], COL["PLAN"], COL["NOTES"], COL["SHOTS"],
 ]
 DATE_FMT = "%Y-%m-%d"
 
 SETUP_OPTS = [
     "V-bottom", "Trap (liquidity)", "Retest", "Range-breakout",
     "Breakout-pullback", "Trend-continuation", "Mean-revert",
-    "News-spike", "Anders/Custom"
+    "News-spike", "Anders/Custom",
 ]
