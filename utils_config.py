@@ -1,23 +1,29 @@
-# utils_config.py — config loader: config.toml -> .env -> defaults
+# utils_config.py — config loader: config.toml -> .env -> defaults (crash-vrij)
 from __future__ import annotations
 import os
 from pathlib import Path
 
-def _load_toml():
+def _load_toml() -> dict:
     cfg = {}
     if Path("config.toml").exists():
         try:
             import tomllib  # py 3.11+
-            with open("config.toml","rb") as f: cfg.update(tomllib.load(f))
+            with open("config.toml","rb") as f:
+                cfg.update(tomllib.load(f))
         except ModuleNotFoundError:
-            import tomli
-            with open("config.toml","rb") as f: cfg.update(tomli.load(f))
+            try:
+                import tomli
+                with open("config.toml","rb") as f:
+                    cfg.update(tomli.load(f))
+            except Exception:
+                pass
         except Exception:
             pass
     return cfg
 
-def load_config():
+def load_config() -> dict:
     cfg = _load_toml()
+    # .env (optioneel)
     try:
         from dotenv import load_dotenv
         load_dotenv(override=False)
