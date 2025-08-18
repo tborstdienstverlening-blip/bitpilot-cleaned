@@ -18,7 +18,8 @@ def read_entries() -> pd.DataFrame:
     except Exception:
         df = pd.DataFrame(columns=ORDER)
     for col in ORDER:
-        if col not in df.columns: df[col] = ""
+        if col not in df.columns:
+            df[col] = ""
     return df[ORDER]
 
 def write_entries(df: pd.DataFrame):
@@ -33,8 +34,9 @@ def export_visible(df_visible: pd.DataFrame):
     cfg = load_config()
     out = Path(cfg["EXPORT_DIR"]) / "journal_export.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
+    df_out = df_visible.copy()
     for col in ORDER:
-        if col not in df_visible.columns:
-            df_visible[col] = ""
-    df_visible[ORDER].to_csv(out, index=False)
+        if col not in df_out.columns:
+            df_out[col] = ""
+    df_out[ORDER].to_csv(out, index=False)
     return out
