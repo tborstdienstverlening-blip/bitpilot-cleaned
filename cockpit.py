@@ -15,7 +15,7 @@ from kpi_utils import with_pnl_total, apply_filters, compute_kpis
 
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
 
-# Healthcheck (staat in Settings, niet bovenin)
+# Healthcheck (in Settings)
 try:
     import healthcheck
 except Exception:
@@ -24,7 +24,6 @@ except Exception:
 CFG = load_config()
 APP = load_state()
 START_UI = APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0))
-ROLLING_N = int(APP.get("rolling_n", 20) or 20)
 
 def _to_num(s) -> float:
     try:
@@ -71,18 +70,13 @@ with scol3: st.caption(f"☁️ Laatste sync: {last_sync_ts or '—'} ({last_syn
 tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
 
 # =======================
-# Settings (incl. tech-info + Rolling N)
+# Settings (zonder Rolling N)
 # =======================
 with tab_settings:
     st.subheader("Instellingen")
-    c1, c2 = st.columns(2)
-    with c1:
-        start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
-    with c2:
-        rolling_val = st.number_input("Rolling winrate — N trades", min_value=5, max_value=200, step=1, value=int(ROLLING_N))
+    start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
     if st.button("💾 Opslaan (Settings)"):
         APP["start_kapitaal"] = float(start_val)
-        APP["rolling_n"] = int(rolling_val)
         save_state(APP)
         st.success("Settings opgeslagen. Herberekenen…")
         st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
@@ -159,51 +153,39 @@ with tab_journal:
         df_all,
         search=st.session_state.get("f_search"),
         tags_csv=st.session_state.get("f_tags"),
-        emoties=st.session_state.get("f_emotie_sel", []),
+        emociones := st.session_state.get("f_emotie_sel", []),
         periode=st.session_state.get("f_periode", "Alle"),
     )
 
     # KPI's
-    k = compute_kpis(df_filtered, start_btc=START_UI, rolling_n=ROLLING_N)
+    k = compute_kpis(df_filtered, start_btc=START_UI)
     def _pct(x):
         return "—" if x is None else f"{x:.2f}%"
 
-    # Rij 1 — deltas = effect laatste trade
+    # R1 — deltas = effect van de LAATSTE trade (Exit/Fees)
     r1 = st.columns(4)
     r1[0].metric("Startkapitaal (BTC)", format_btc(k["start"]))
     r1[1].metric("Actueel kapitaal (BTC)", format_btc(k["actueel"]),
-                 delta=(format_btc(k["last_actueel_delta_btc"]) if k["last_actueel_delta_btc"] != 0 else None))
+                 delta=(format_btc(k["delta_actueel_btc"]) if k["delta_actueel_btc"] != 0 else None))
     r1[2].metric("Totale PnL (BTC)", format_btc(k["pnl"]),
-                 delta=(format_btc(k["last_pnl_delta_btc"]) if k["last_pnl_delta_btc"] != 0 else None))
-    # Fees als negatieve delta tonen
-    last_fee = k["last_fees_delta_btc"]
-    fee_delta_str = f"-{format_btc(abs(last_fee))}" if last_fee else None
-    r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]), delta=fee_delta_str)
+                 delta=(format_btc(k["delta_pnl_btc"]) if k["delta_pnl_btc"] != 0 else None))
+    r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]),
+                 delta=(format_btc(k["delta_fees_btc"]) if k["delta_fees_btc"] != 0 else None))
 
-    # Rij 2 — ROI & winrates (met delta obv laatste trade)
-    r2 = st.columns(4)
-    roi_delta = (f'{k["last_roi_delta_pct"]:.2f} pp' if k["last_roi_delta_pct"] is not None and k["last_roi_delta_pct"] != 0 else None)
+    # R2 — ROI en winrates (Rolling verwijderd)
+    r2 = st.columns(3)
+    roi_delta = (f'{k["delta_roi_pp"]:.2f} pp' if k["delta_roi_pp"] is not None and k["delta_roi_pp"] != 0 else None)
     r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=roi_delta)
-
     r2[1].metric("Winnende trades", f'{k["wins"]}')
-    r2[2].metric("Verloren trades", f'{k["losses"]}')
-
-    # Winrate delta pijltje ↑/↓
-    wr = _pct(k["winrate_pct"])
-    wrd = k.get("winrate_delta_pp", None)
-    wr_delta_str = None
-    if wrd is not None and wrd != 0:
-        arrow = "↑" if wrd > 0 else "↓"
-        wr_delta_str = f"{arrow} {abs(wrd):.2f} pp"
-    r2[3].metric(f"Rolling Winrate % (N={ROLLING_N})", _pct(k["rolling_winrate_pct"]),
-                 delta=(f"{'↑' if (k.get('rolling_winrate_delta_pp',0) or 0) > 0 else '↓'} {abs(k.get('rolling_winrate_delta_pp',0.0)):.2f} pp"
-                        if k.get("rolling_winrate_delta_pp") not in (None, 0) else None))
+    # Winrate pijltje ↑/↓ afhankelijk van laatste trade
+    wr_arrow = k.get("winrate_arrow")
+    r2[2].metric("Winrate %", _pct(k["winrate_pct"]), delta=(wr_arrow if wr_arrow else None))
 
     if df_filtered.empty:
         st.info("Nog geen trades in selectie.")
     st.divider()
 
-    # Tabel zoals eerder
+    # Tabel (same as eerder)
     vis_cols = [
         COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
         COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
@@ -328,7 +310,7 @@ with tab_journal:
                 COL["ENTRY"]: e_entry, COL["SL"]: e_sl, COL["TP"]: "",
                 COL["TP1"]: e_tp1, COL["TP2"]: e_tp2, COL["TP3"]: e_tp3,
                 COL["PNL_TP1"]: e_p1, COL["PNL_TP2"]: e_p2, COL["PNL_TP3"]: e_p3, COL["PNL_EXIT"]: e_px,
-                COL["PNL_TOTAL"]: "",  # wordt telkens herberekend bij load
+                COL["PNL_TOTAL"]: "",  # herberekenen bij load
                 COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: e_fees, COL["ACCOUNT"]: "",
                 COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: e_em, COL["PLAN"]: e_plan, COL["NOTES"]: e_note, COL["SHOTS"]: e_shot
             }
