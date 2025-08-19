@@ -1,4 +1,4 @@
-# journal_store.py — centrale opslag + CRUD + backups
+# journal_store.py — centrale opslag + CRUD + backups + save-marker
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
@@ -6,13 +6,16 @@ import pandas as pd
 from schema import COL, ORDER, DATE_FMT
 from utils_config import load_config
 
+def _cfg(): return load_config()
+
 def _csv_path() -> Path:
-    cfg = load_config()
-    return Path(cfg["DATA_DIR"]) / "journal_entries.csv"
+    return Path(_cfg()["DATA_DIR"]) / "journal_entries.csv"
 
 def _bak_dir() -> Path:
-    cfg = load_config()
-    return Path(cfg["DATA_DIR"]) / ".bak"
+    return Path(_cfg()["DATA_DIR"]) / ".bak"
+
+def _save_marker_path() -> Path:
+    return Path(_cfg()["DATA_DIR"]) / ".last_save.txt"
 
 def _ensure_seed():
     csv = _csv_path()
@@ -20,22 +23,45 @@ def _ensure_seed():
     if not csv.exists():
         pd.DataFrame(columns=ORDER).to_csv(csv, index=False)
 
+def _touch_save_marker():
+    try:
+        _save_marker_path().write_text(datetime.utcnow().isoformat() + "Z", encoding="utf-8")
+    except Exception:
+        pass
+
+def get_last_save_ts() -> str:
+    p = _save_marker_path()
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
 def load_journal() -> pd.DataFrame:
     _ensure_seed()
     try:
         df = pd.read_csv(_csv_path())
     except Exception:
-        df = pd.DataFrame(columns=ORDER)
+        # probeer laatste geldige backup
+        df = _load_last_good_backup()
     for col in ORDER:
         if col not in df.columns:
             df[col] = ""
     return df[ORDER]
 
+def _load_last_good_backup() -> pd.DataFrame:
+    bd = _bak_dir()
+    bd.mkdir(parents=True, exist_ok=True)
+    cands = sorted(bd.glob("journal_*.csv"), reverse=True)
+    for f in cands:
+        try:
+            df = pd.read_csv(f)
+            return df
+        except Exception:
+            continue
+    return pd.DataFrame(columns=ORDER)
+
 def _backup(df: pd.DataFrame):
     try:
         bd = _bak_dir()
         bd.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         out = bd / f"journal_{ts}.csv"
         df.to_csv(out, index=False)
     except Exception:
@@ -47,9 +73,10 @@ def save_journal(df: pd.DataFrame) -> None:
     tmp = _csv_path().with_suffix(".csv.tmp")
     df[ORDER].to_csv(tmp, index=False)
     tmp.replace(_csv_path())  # atomic rename
+    _touch_save_marker()
 
 def _today_prefix() -> str:
-    return datetime.now().strftime("T-%Y%m%d-")
+    return datetime.utcnow().strftime("T-%Y%m%d-")
 
 def _next_id(df: pd.DataFrame) -> str:
     prefix = _today_prefix()
@@ -88,3 +115,4 @@ def delete_entry(trade_id: str) -> None:
         raise ValueError(f"Trade_ID niet gevonden: {trade_id}")
     df = df.loc[~mask].copy()
     save_journal(df)
+
