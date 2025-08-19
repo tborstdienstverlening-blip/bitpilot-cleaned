@@ -4,12 +4,15 @@ import numpy as np
 import streamlit as st
 import pandas as pd
 from math import ceil
+from pathlib import Path
 
 from schema import COL, ORDER, DATE_FMT, SETUP_OPTS
 from utils_config import load_config, format_btc
-from journal_store import load_journal, append_entry, update_entry, delete_entry
+from journal_store import load_journal, append_entry, update_entry, delete_entry, get_last_save_ts
 from import_export import export_visible
 from app_state import load_state, save_state
+from backup_utils import make_backup_zip, list_local_backups, restore_from_backup
+import github_sync
 
 # JS-fix: page_config zo vroeg mogelijk
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
@@ -76,28 +79,85 @@ with st.sidebar:
     st.multiselect("Emoties", ["Kalm","Twijfel","Stress"])
     st.button("Reset filters", on_click=reset_filters)
 
+# ---------- Top statusbalk (rechts) ----------
+last_save = get_last_save_ts()
+last_sync_ts = APP.get("last_sync_ts", "")
+last_sync_msg = APP.get("last_sync_msg", "Sync uit")
+scol1, scol2, scol3 = st.columns([6,2,2])
+with scol2: st.caption(f"💾 Laatste save: {last_save or '—'}")
+with scol3: st.caption(f"☁️ Laatste sync: {last_sync_ts or '—'} ({last_sync_msg})")
+
 # ---------- Tabs ----------
 tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
 
 # =======================
-# Tab: Settings
+# Tab: Settings (met GitHub backup instellingen)
 # =======================
 with tab_settings:
     st.subheader("Instellingen")
+    # Startkapitaal (BTC)
     start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
-    cols = st.columns([1,1])
-    if cols[0].button("💾 Opslaan (Settings)"):
-        save_state({"start_kapitaal": float(start_val)})
+    if st.button("💾 Opslaan (Settings)"):
+        APP["start_kapitaal"] = float(start_val)
+        save_state(APP)
         st.success("Settings opgeslagen. Herberekenen…")
         st.experimental_set_query_params(cb=str(int(time.time())))
         st.rerun()
-    # Hard reload / cache-bust tegen 1Ldio.js
-    if cols[1].button("🔄 Hard reload (cache-bust)"):
+
+    st.divider()
+    st.subheader("Back-ups naar GitHub (optioneel)")
+    APP["gh_sync_enabled"] = st.toggle("Back-ups naar GitHub inschakelen", value=bool(APP.get("gh_sync_enabled", False)))
+    APP["gh_repo"]   = st.text_input("Repo (owner/repo)", value=str(APP.get("gh_repo","")))
+    APP["gh_branch"] = st.text_input("Branch", value=str(APP.get("gh_branch","main") or "main"))
+    APP["gh_dir"]    = st.text_input("Pad in repo", value=str(APP.get("gh_dir","data") or "data"))
+    cols = st.columns([1,1,1,1])
+    if cols[0].button("🔌 Test verbinding"):
+        ok, msg = github_sync.test_connection(
+            github_sync.GhSettings(APP["gh_sync_enabled"], APP["gh_repo"], APP["gh_branch"], APP["gh_dir"])
+        )
+        st.success(msg) if ok else st.error(msg)
+    if cols[1].button("☁️ Back-up nu (GitHub)"):
+        save_state(APP)  # persist settings
+        ok, msg = github_sync.sync_now(force=True)
+        st.success(msg) if ok else st.error(msg)
+        # reload status
+        st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
+    # Download zip
+    if cols[2].button("📦 Download back-up (.zip)"):
+        blob = make_backup_zip()
+        st.download_button("Download ZIP", data=blob, file_name="bitpilot-backup.zip", mime="application/zip")
+    # Hard reload
+    if cols[3].button("🔄 Hard reload (cache-bust)"):
         st.experimental_set_query_params(cb=str(int(time.time())))
         st.rerun()
 
+    st.divider()
+    st.subheader("Herstel uit back-up (lokaal)")
+    bak_type = st.selectbox("Type", ["Journal (.csv)","App state (.json)"])
+    ext = ".csv" if bak_type.startswith("Journal") else ".json"
+    choices = list_local_backups(ext=ext)
+    label = [p.name for p in choices]
+    idx = st.selectbox("Kies back-up", list(range(len(choices))), format_func=lambda i: label[i] if label else "—") if choices else None
+    if choices:
+        sel = choices[int(idx)]
+        st.caption(f"Geselecteerd: {sel.name}")
+        # kleine preview
+        if ext == ".csv":
+            try:
+                df_prev = pd.read_csv(sel)
+                st.write("Voorbeeld (head):", df_prev.head(5))
+                st.write("Rijen:", len(df_prev))
+            except Exception as e:
+                st.warning(f"Kan preview niet laden: {e}")
+        if st.button("♻️ Herstel deze back-up", disabled=not bool(choices)):
+            ok, msg = restore_from_backup(sel)
+            st.success(msg) if ok else st.error(msg)
+            st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
+    else:
+        st.info("Geen lokale back-ups gevonden in data/.bak/")
+
 # =======================
-# Tab: Journal (full-width tabel; onderaan twee blokken)
+# Tab: Journal (full-width tabel + twee blokken)
 # =======================
 with tab_journal:
     st.title("Journal — Overzicht + CRUD")
@@ -112,15 +172,12 @@ with tab_journal:
         c3.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
         c4.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
 
-    # Data laden + sort + zoek
+    # Data laden + PNL_TOTAL + sort + zoek
     df_all = load_journal()
-
-    # Bereken PNL_Total per rij (03e)
     try:
         df_all[COL["PNL_TOTAL"]] = df_all.apply(calc_row_pnl, axis=1)
     except Exception:
         df_all[COL["PNL_TOTAL"]] = 0.0
-
     try:
         df_all["_dt"] = pd.to_datetime(df_all[COL["DATUM"]], format=DATE_FMT, errors="coerce")
     except Exception:
@@ -133,7 +190,7 @@ with tab_journal:
                df_all[COL["TAGS"]].astype(str).str.lower().str.contains(q)
         df_all = df_all[mask]
 
-    # --- TABEL FULL-WIDTH: zichtbare kolommen & volgorde (zonder TFs etc.)
+    # TABEL FULL-WIDTH
     vis_order_labels = [
         COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
         COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
@@ -141,18 +198,15 @@ with tab_journal:
         COL["PNL_EXIT"], COL["FEES"], COL["EMOTIES"],
         "Plan_preview", "Notities_preview", "🖼️",
     ]
-
     df_view = df_all.copy()
     df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
     df_view["Plan_preview"]     = df_view[COL["PLAN"]].apply(lambda x: _short(x, 60))
     df_view["Notities_preview"] = df_view[COL["NOTES"]].apply(lambda x: _short(x, 60))
     df_view["🖼️"] = df_view[COL["SHOTS"]].apply(lambda x: "🖼️" if str(x).strip() else "")
     for col in vis_order_labels:
-        if col not in df_view.columns:
-            df_view[col] = ""
+        if col not in df_view.columns: df_view[col] = ""
     table_df = df_view[vis_order_labels].reset_index(drop=True)
 
-    # Conditional formatting PnL-kolommen (BTC)
     pnl_cols = [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
     fmt_map = {c: (lambda v: format_btc(v) if pd.notna(v) and str(v) != "" else "—") for c in pnl_cols + [COL["FEES"]]}
 
@@ -165,7 +219,7 @@ with tab_journal:
     except Exception:
         st.dataframe(table_df, use_container_width=True, hide_index=True)
 
-    # ---------- KPI-balk ONDER DE TABEL (BTC, mét PnL aggregatie 03e)
+    # KPI-balk
     kpis = _kpis_btc(df_all, start_btc=START_UI)
     st.divider()
     kc0, kc1, kc2, kc3 = st.columns(4)
@@ -174,9 +228,9 @@ with tab_journal:
     kc2.metric("Totale PnL",      format_btc(kpis["pnl"]))
     kc3.metric("Totale Fees",     format_btc(kpis["fees"]))
 
-    # ---------- BLOK 1: 🆕 Trades invoeren (ingeklapt)
+    # ---------- 🆕 Trades invoeren ----------
     with st.expander("🆕 Trades invoeren", expanded=False):
-        with st.form(key="form_add"):
+        with st.form():
             c1, c2 = st.columns(2)
             with c1:
                 d_datum = st.date_input(COL["DATUM"])
@@ -200,8 +254,8 @@ with tab_journal:
                 d_plan = st.text_area(COL["PLAN"])
                 d_note = st.text_area(COL["NOTES"])
                 d_shot = st.text_input(COL["SHOTS"])
-            btn_add = st.form_submit_button("Opslaan (nieuw)", type="primary")
-        if btn_add:
+            add_btn = st.form_submit_button("Opslaan (nieuw)", type="primary")
+        if add_btn:
             setup_value = d_custom.strip() if d_setup == "Anders/Custom" and d_custom else d_setup
             new = {
                 COL["DATUM"]: pd.to_datetime(d_datum).strftime(DATE_FMT),
@@ -220,14 +274,17 @@ with tab_journal:
                                            COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], COL["FEES"]]]
             try:
                 tid = append_entry(new)
+                # optionele autosync
+                if APP.get("gh_sync_enabled", False):
+                    ok, msg = github_sync.sync_now()
+                    st.info(msg)
                 st.success(f"Toegevoegd ✅ (Trade_ID: {tid})")
                 st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
             except Exception as e:
                 st.error(str(e))
 
-    # ---------- BLOK 2: ✏️ Trades bewerken/verwijderen (ingeklapt)
+    # ---------- ✏️ Trades bewerken/verwijderen ----------
     with st.expander("✏️ Trades bewerken/verwijderen", expanded=False):
-        # selectie binnen dit blok
         trade_ids = df_all[COL["TRADE_ID"]].astype(str).tolist()
         sel_tid = st.selectbox("Selecteer Trade_ID", ["(geen)"] + trade_ids, index=0)
         if sel_tid != "(geen)":
@@ -235,7 +292,7 @@ with tab_journal:
         else:
             initial = {c: "" for c in ORDER}
 
-        with st.form(key="form_edit"):
+        with st.form():
             c1, c2 = st.columns(2)
             with c1:
                 e_datum = st.date_input(COL["DATUM"], value=pd.to_datetime(initial.get(COL["DATUM"]) or pd.Timestamp.now()).date())
@@ -293,6 +350,10 @@ with tab_journal:
                 else:
                     update_entry(sel_tid, upd)
                     st.success("Gewijzigd ✅")
+                # optionele autosync
+                if APP.get("gh_sync_enabled", False):
+                    ok, msg = github_sync.sync_now()
+                    st.info(msg)
                 st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -301,11 +362,14 @@ with tab_journal:
             try:
                 delete_entry(sel_tid)
                 st.success("Verwijderd ✅")
+                if APP.get("gh_sync_enabled", False):
+                    ok, msg = github_sync.sync_now()
+                    st.info(msg)
                 st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
             except Exception as e:
                 st.error(str(e))
 
     # Export zichtbare rijen (neemt ALLE schema-kolommen mee via export_visible)
     if st.button("Exporteer zichtbare rijen (.csv)"):
-        out = export_visible(df_all)  # export_visible ordent volgens ORDER en vult ontbrekende kolommen aan
+        out = export_visible(df_all)
         st.success(f"Export voltooid: `{out}`")
