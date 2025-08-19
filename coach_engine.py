@@ -18,11 +18,9 @@ def _ensure_notes_path() -> Path:
 def ai_add_trade(payload: dict) -> str:
     """Voeg trade toe vanuit AI-payload; valideer kolommen; defaults invullen."""
     row = {c: payload.get(c, "") for c in ORDER}
-    # minimaal: datum en setup zijn handig maar niet verplicht; Trade_ID auto
     return append_entry(row)
 
 def ai_update_trade(trade_id: str, payload: dict) -> None:
-    """Werk bestaande trade bij."""
     updates = {k: v for k, v in payload.items() if k in ORDER}
     update_entry(trade_id, updates)
 
