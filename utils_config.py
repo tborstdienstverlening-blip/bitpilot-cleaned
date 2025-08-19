@@ -36,8 +36,8 @@ def load_config() -> dict:
     cfg["EXPORT_DIR"] = os.getenv("BITPILOT_EXPORT_DIR", cfg.get("EXPORT_DIR", "data/export"))
     cfg["SHOTS_DIR"]  = os.getenv("BITPILOT_SHOTS_DIR",  cfg.get("SHOTS_DIR", "resources/screens"))
 
-    # R0.2-03 BTC
-    cfg["DENOM"]        = os.getenv("DENOM",        cfg.get("DENOM", "BTC"))
+    # BTC settings
+    cfg["DENOM"]        = os.getenv("DENOM", cfg.get("DENOM", "BTC"))
     cfg["BTC_DECIMALS"] = int(os.getenv("BTC_DECIMALS", cfg.get("BTC_DECIMALS", 6)))
 
     # mappen aanmaken (geen crash)
@@ -54,3 +54,4 @@ def format_btc(x: float, decimals: int | None = None) -> str:
     except Exception:
         return "—"
     return f"Ƀ {val:.{d}f}"
+
