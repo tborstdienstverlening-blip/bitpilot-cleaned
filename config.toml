@@ -1,4 +1,8 @@
-START_KAPITAAL = 1000
+START_KAPITAAL = 0
 DATA_DIR = "data"
 EXPORT_DIR = "data/export"
 SHOTS_DIR = "resources/screens"
+
+# R0.2-03 — BTC-denominatie
+DENOM = "BTC"
+BTC_DECIMALS = 6
