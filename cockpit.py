@@ -13,10 +13,9 @@ from backup_utils import make_backup_zip, list_local_backups, restore_from_backu
 import github_sync
 from kpi_utils import with_pnl_total, apply_filters, compute_kpis
 
-# Page config zo vroeg mogelijk (JS-fix)
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
 
-# Healthcheck optioneel (nu verplaatst naar Settings)
+# Healthcheck (staat in Settings, niet bovenin)
 try:
     import healthcheck
 except Exception:
@@ -27,7 +26,6 @@ APP = load_state()
 START_UI = APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0))
 ROLLING_N = int(APP.get("rolling_n", 20) or 20)
 
-# -------- Helpers --------
 def _to_num(s) -> float:
     try:
         return float(str(s).strip().replace(",", ".")) if str(s).strip() != "" else 0.0
@@ -38,14 +36,14 @@ def _short(txt: str, n=60):
     txt = str(txt or "")
     return txt if len(txt) <= n else txt[:n] + "…"
 
-# -------- Sidebar filters (zelfde keys als voorheen) --------
+# -------- Filters --------
 DEFAULTS = dict(
     f_portefeuille="Alle",
     f_periode="Alle",
     f_categorie=[],
     f_search="",
     f_tags="",
-    f_emoties=[],
+    f_emotie_sel=[],
 )
 def reset_filters():
     for k, v in DEFAULTS.items():
@@ -61,7 +59,7 @@ with st.sidebar:
     st.multiselect("Emoties", ["Kalm","Twijfel","Stress"], key="f_emotie_sel")
     st.button("Reset filters", on_click=reset_filters)
 
-# -------- Top status (rechts) --------
+# -------- Status rechtsboven --------
 last_save = get_last_save_ts()
 last_sync_ts = APP.get("last_sync_ts", "")
 last_sync_msg = APP.get("last_sync_msg", "Sync uit")
@@ -73,7 +71,7 @@ with scol3: st.caption(f"☁️ Laatste sync: {last_sync_ts or '—'} ({last_syn
 tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
 
 # =======================
-# Settings-tab (incl. tech-info en Rolling N)
+# Settings (incl. tech-info + Rolling N)
 # =======================
 with tab_settings:
     st.subheader("Instellingen")
@@ -137,25 +135,26 @@ with tab_settings:
 
     st.divider()
     st.subheader("Systeeminfo")
-    if healthcheck and hasattr(healthcheck, "report"):
-        rep = healthcheck.report()
-        s0, s1, s2 = st.columns(3)
-        s0.metric("Python", rep.get("python","?"))
-        s1.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
-        s2.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
-    else:
+    try:
+        if healthcheck and hasattr(healthcheck, "report"):
+            rep = healthcheck.report()
+            s0, s1, s2 = st.columns(3)
+            s0.metric("Python", rep.get("python","?"))
+            s1.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
+            s2.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
+        else:
+            st.caption("Healthcheck niet beschikbaar.")
+    except Exception:
         st.caption("Healthcheck niet beschikbaar.")
 
 # =======================
-# Journal-tab (KPI-balk BOVEN, daarna tabel + blokken)
+# Journal (KPI-balk bovenaan)
 # =======================
 with tab_journal:
     st.title("Journal")
 
-    # 1) Data laden en filteren
-    df_all = load_journal()
-    df_all = with_pnl_total(df_all)
-
+    # Data + filters
+    df_all = with_pnl_total(load_journal())
     df_filtered = apply_filters(
         df_all,
         search=st.session_state.get("f_search"),
@@ -164,32 +163,47 @@ with tab_journal:
         periode=st.session_state.get("f_periode", "Alle"),
     )
 
-    # 2) KPI-balk (boven de journal)
+    # KPI's
     k = compute_kpis(df_filtered, start_btc=START_UI, rolling_n=ROLLING_N)
-
     def _pct(x):
         return "—" if x is None else f"{x:.2f}%"
 
-    # eerste rij
+    # Rij 1 — deltas = effect laatste trade
     r1 = st.columns(4)
     r1[0].metric("Startkapitaal (BTC)", format_btc(k["start"]))
     r1[1].metric("Actueel kapitaal (BTC)", format_btc(k["actueel"]),
-                 delta=f'{(k["actueel"]-k["start"]):.6f}' if k["start"] is not None else None)
-    r1[2].metric("Totale PnL (BTC)", format_btc(k["pnl"]), delta=f'{k["pnl"]:.6f}')
-    r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]), delta=f'{-abs(k["fees"]):.6f}')
+                 delta=(format_btc(k["last_actueel_delta_btc"]) if k["last_actueel_delta_btc"] != 0 else None))
+    r1[2].metric("Totale PnL (BTC)", format_btc(k["pnl"]),
+                 delta=(format_btc(k["last_pnl_delta_btc"]) if k["last_pnl_delta_btc"] != 0 else None))
+    # Fees als negatieve delta tonen
+    last_fee = k["last_fees_delta_btc"]
+    fee_delta_str = f"-{format_btc(abs(last_fee))}" if last_fee else None
+    r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]), delta=fee_delta_str)
 
-    # tweede rij
+    # Rij 2 — ROI & winrates (met delta obv laatste trade)
     r2 = st.columns(4)
-    r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=f'{k["roi_pct"]:.2f}%' if k["roi_pct"] is not None else None)
+    roi_delta = (f'{k["last_roi_delta_pct"]:.2f} pp' if k["last_roi_delta_pct"] is not None and k["last_roi_delta_pct"] != 0 else None)
+    r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=roi_delta)
+
     r2[1].metric("Winnende trades", f'{k["wins"]}')
     r2[2].metric("Verloren trades", f'{k["losses"]}')
-    r2[3].metric(f"Rolling Winrate % (N={ROLLING_N})", _pct(k["rolling_winrate_pct"]))
+
+    # Winrate delta pijltje ↑/↓
+    wr = _pct(k["winrate_pct"])
+    wrd = k.get("winrate_delta_pp", None)
+    wr_delta_str = None
+    if wrd is not None and wrd != 0:
+        arrow = "↑" if wrd > 0 else "↓"
+        wr_delta_str = f"{arrow} {abs(wrd):.2f} pp"
+    r2[3].metric(f"Rolling Winrate % (N={ROLLING_N})", _pct(k["rolling_winrate_pct"]),
+                 delta=(f"{'↑' if (k.get('rolling_winrate_delta_pp',0) or 0) > 0 else '↓'} {abs(k.get('rolling_winrate_delta_pp',0.0)):.2f} pp"
+                        if k.get("rolling_winrate_delta_pp") not in (None, 0) else None))
 
     if df_filtered.empty:
         st.info("Nog geen trades in selectie.")
     st.divider()
 
-    # 3) Tabel (full-width) — zelfde zichtbare kolommen
+    # Tabel zoals eerder
     vis_cols = [
         COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
         COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
@@ -218,7 +232,7 @@ with tab_journal:
     except Exception:
         st.dataframe(table_df, use_container_width=True, hide_index=True)
 
-    # 4) 🆕 Trades invoeren
+    # ---- Invoeren
     with st.expander("🆕 Trades invoeren", expanded=False):
         with st.form(key="form_add"):
             c1, c2 = st.columns(2)
@@ -268,7 +282,7 @@ with tab_journal:
             except Exception as e:
                 st.error(str(e))
 
-    # 5) ✏️ Trades bewerken/verwijderen
+    # ---- Bewerken/verwijderen
     with st.expander("✏️ Trades bewerken/verwijderen", expanded=False):
         trade_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
         sel_tid = st.selectbox("Selecteer Trade_ID", ["(geen)"] + trade_ids, index=0)
@@ -314,7 +328,7 @@ with tab_journal:
                 COL["ENTRY"]: e_entry, COL["SL"]: e_sl, COL["TP"]: "",
                 COL["TP1"]: e_tp1, COL["TP2"]: e_tp2, COL["TP3"]: e_tp3,
                 COL["PNL_TP1"]: e_p1, COL["PNL_TP2"]: e_p2, COL["PNL_TP3"]: e_p3, COL["PNL_EXIT"]: e_px,
-                COL["PNL_TOTAL"]: "",  # opnieuw berekenen bij load
+                COL["PNL_TOTAL"]: "",  # wordt telkens herberekend bij load
                 COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: e_fees, COL["ACCOUNT"]: "",
                 COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: e_em, COL["PLAN"]: e_plan, COL["NOTES"]: e_note, COL["SHOTS"]: e_shot
             }
@@ -345,8 +359,6 @@ with tab_journal:
             except Exception as e:
                 st.error(str(e))
 
-    # Export
     if st.button("Exporteer zichtbare rijen (.csv)"):
         out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
-
