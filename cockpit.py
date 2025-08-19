@@ -1,345 +1,297 @@
 from __future__ import annotations
 import time
-import numpy as np
 import streamlit as st
 import pandas as pd
 
 from schema import COL, ORDER, DATE_FMT, SETUP_OPTS
 from utils_config import load_config, format_btc
-from journal_store import load_journal, append_entry, update_entry, delete_entry, get_last_save_ts
+from journal_store import load_journal, save_journal, append_entry, update_entry, delete_entry, get_last_save_ts
 from import_export import export_visible
 from app_state import load_state, save_state
 from backup_utils import make_backup_zip, list_local_backups, restore_from_backup
 import github_sync
 from kpi_utils import with_pnl_total, apply_filters, compute_kpis
+from risk_utils import compute_risk_contracts
 
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
 
-# Healthcheck (in Settings)
-try:
-    import healthcheck
-except Exception:
-    healthcheck = None
-
+# ------- config/state -------
 CFG = load_config()
 APP = load_state()
-START_UI = APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0))
+START_UI = float(APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0)))
+# Risk settings (inline, persist in app_state)
+APP.setdefault("risk_pct", 0.01)           # 1%
+APP.setdefault("risk_rounding", "floor")   # floor | round | ceil
+APP.setdefault("filters", {"periode":"Alle","search":"","tags":"","emoties":[]})
+save_state(APP)  # ensure defaults saved
 
-def _to_num(s) -> float:
+def _f(x):
     try:
-        return float(str(s).strip().replace(",", ".")) if str(s).strip() != "" else 0.0
+        s = str(x).strip().replace(",", ".")
+        return None if s=="" else float(s)
     except Exception:
-        return 0.0
+        return None
 
 def _short(txt: str, n=60):
     txt = str(txt or "")
     return txt if len(txt) <= n else txt[:n] + "…"
 
-# -------- Filters --------
-DEFAULTS = dict(
-    f_portefeuille="Alle",
-    f_periode="Alle",
-    f_categorie=[],
-    f_search="",
-    f_tags="",
-    f_emotie_sel=[],
-)
-def reset_filters():
-    for k, v in DEFAULTS.items():
-        st.session_state[k] = v
-
-with st.sidebar:
-    st.title("⚙️ Filters")
-    st.selectbox("Portefeuille", ["Alle","LT","Swing"], key="f_portefeuille")
-    st.selectbox("Periode", ["Alle","YTD","MTD","WTD"], key="f_periode")
-    st.multiselect("Categorie", ["BTC","Equities","FX","Commodities"], key="f_categorie")
-    st.text_input("🔍 Zoek (Trade_ID of Tags)", key="f_search")
-    st.text_input("🔖 Tags (comma)", key="f_tags")
-    st.multiselect("Emoties", ["Kalm","Twijfel","Stress"], key="f_emotie_sel")
-    st.button("Reset filters", on_click=reset_filters)
-
-# -------- Status rechtsboven --------
-last_save = get_last_save_ts()
-last_sync_ts = APP.get("last_sync_ts", "")
-last_sync_msg = APP.get("last_sync_msg", "Sync uit")
-scol1, scol2, scol3 = st.columns([6,2,2])
-with scol2: st.caption(f"💾 Laatste save: {last_save or '—'}")
-with scol3: st.caption(f"☁️ Laatste sync: {last_sync_ts or '—'} ({last_sync_msg})")
-
-# -------- Tabs --------
-tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
-
-# =======================
-# Settings (zonder Rolling N)
-# =======================
-with tab_settings:
-    st.subheader("Instellingen")
-    start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
-    if st.button("💾 Opslaan (Settings)"):
-        APP["start_kapitaal"] = float(start_val)
-        save_state(APP)
-        st.success("Settings opgeslagen. Herberekenen…")
-        st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
-
-    st.divider()
-    st.subheader("Back-ups naar GitHub (optioneel)")
-    APP["gh_sync_enabled"] = st.toggle("Back-ups naar GitHub inschakelen", value=bool(APP.get("gh_sync_enabled", False)))
-    APP["gh_repo"]   = st.text_input("Repo (owner/repo)", value=str(APP.get("gh_repo","")))
-    APP["gh_branch"] = st.text_input("Branch", value=str(APP.get("gh_branch","main") or "main"))
-    APP["gh_dir"]    = st.text_input("Pad in repo", value=str(APP.get("gh_dir","data") or "data"))
-    cols = st.columns(4)
-    if cols[0].button("🔌 Test verbinding"):
-        ok, msg = github_sync.test_connection(
-            github_sync.GhSettings(APP["gh_sync_enabled"], APP["gh_repo"], APP["gh_branch"], APP["gh_dir"])
-        )
-        st.success(msg) if ok else st.error(msg)
-    if cols[1].button("☁️ Back-up nu (GitHub)"):
-        save_state(APP)
-        ok, msg = github_sync.sync_now(force=True)
-        st.success(msg) if ok else st.error(msg)
-        st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
-    if cols[2].button("📦 Download back-up (.zip)"):
-        blob = make_backup_zip()
-        st.download_button("Download ZIP", data=blob, file_name="bitpilot-backup.zip", mime="application/zip")
-    if cols[3].button("🔄 Hard reload (cache-bust)"):
-        st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
-
-    st.divider()
-    st.subheader("Herstel uit back-up (lokaal)")
-    bak_type = st.selectbox("Type", ["Journal (.csv)","App state (.json)"])
-    ext = ".csv" if bak_type.startswith("Journal") else ".json"
-    choices = list_local_backups(ext=ext)
-    if choices:
-        names = [p.name for p in choices]
-        idx = st.selectbox("Kies back-up", list(range(len(choices))), format_func=lambda i: names[i])
-        sel = choices[int(idx)]
-        st.caption(f"Geselecteerd: {sel.name}")
-        if ext == ".csv":
-            try:
-                df_prev = pd.read_csv(sel)
-                st.write("Voorbeeld (head):", df_prev.head(5)); st.write("Rijen:", len(df_prev))
-            except Exception as e:
-                st.warning(f"Kan preview niet laden: {e}")
-        if st.button("♻️ Herstel deze back-up"):
-            ok, msg = restore_from_backup(sel)
-            st.success(msg) if ok else st.error(msg)
-            st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
-    else:
-        st.info("Geen lokale back-ups gevonden in data/.bak/")
-
-    st.divider()
-    st.subheader("Systeeminfo")
-    try:
-        if healthcheck and hasattr(healthcheck, "report"):
-            rep = healthcheck.report()
-            s0, s1, s2 = st.columns(3)
-            s0.metric("Python", rep.get("python","?"))
-            s1.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
-            s2.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
-        else:
-            st.caption("Healthcheck niet beschikbaar.")
-    except Exception:
-        st.caption("Healthcheck niet beschikbaar.")
-
-# =======================
-# Journal (KPI-balk bovenaan)
-# =======================
-with tab_journal:
+# ------- Topbar: Filters & Settings popovers -------
+c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
+with c1:
     st.title("Journal")
+with c2:
+    with st.popover("🔎 Filters", use_container_width=True):
+        filt = APP["filters"]
+        filt["periode"] = st.selectbox("Periode", ["Alle","YTD","MTD","WTD"], index=["Alle","YTD","MTD","WTD"].index(filt.get("periode","Alle")))
+        filt["search"]  = st.text_input("Zoek (Trade_ID of Tags)", value=filt.get("search",""))
+        filt["tags"]    = st.text_input("Tags (comma)", value=filt.get("tags",""))
+        filt["emoties"] = st.multiselect("Emoties", ["Kalm","Twijfel","Stress"], default=filt.get("emoties", []))
+        cols = st.columns(2)
+        if cols[0].button("Reset"):
+            filt.update({"periode":"Alle","search":"","tags":"","emoties":[]})
+        if cols[1].button("Toepassen"):
+            APP["filters"] = filt; save_state(APP); st.rerun()
+with c3:
+    with st.popover("⚙️ Risk settings", use_container_width=True):
+        st.caption("Deribit BTC-PERP (1 contract = $1)")
+        risk_pct = st.number_input("Risk % (van account)", min_value=0.0, max_value=100.0, step=0.05, value=float(APP.get("risk_pct",1.0)*100)) / 100.0
+        rounding = st.selectbox("Round contracts", ["floor","round","ceil"], index=["floor","round","ceil"].index(APP.get("risk_rounding","floor")))
+        acct = st.number_input("Account (BTC) voor risk", min_value=0.0, step=0.000001, value=float(START_UI))
+        if st.button("Opslaan (risk)", type="primary"):
+            APP["risk_pct"] = float(risk_pct); APP["risk_rounding"] = rounding
+            APP["account_for_risk"] = float(acct); save_state(APP); st.toast("Risk settings opgeslagen")
+with c4:
+    # Quick status
+    last_save = get_last_save_ts()
+    st.caption(f"💾 Laatste save: {last_save or '—'}")
 
-    # Data + filters
-    df_all = with_pnl_total(load_journal())
-    df_filtered = apply_filters(
-        df_all,
-        search=st.session_state.get("f_search"),
-        tags_csv=st.session_state.get("f_tags"),
-        emoties=st.session_state.get("f_emotie_sel", []),  # <-- FIX: keywordargument, geen walrus
-        periode=st.session_state.get("f_periode", "Alle"),
-    )
+st.divider()
 
-    # KPI's
-    k = compute_kpis(df_filtered, start_btc=START_UI)
-    def _pct(x):
-        return "—" if x is None else f"{x:.2f}%"
+# ------- Data load + per-rij auto velden (Risk/Contracts/RR) -------
+df_raw = load_journal()
+if df_raw is None or df_raw.empty:
+    df_raw = pd.DataFrame(columns=ORDER)
 
-    # R1 — deltas = effect van de LAATSTE trade (Exit/Fees)
-    r1 = st.columns(4)
-    r1[0].metric("Startkapitaal (BTC)", format_btc(k["start"]))
-    r1[1].metric("Actueel kapitaal (BTC)", format_btc(k["actueel"]),
-                 delta=(format_btc(k["delta_actueel_btc"]) if k["delta_actueel_btc"] != 0 else None))
-    r1[2].metric("Totale PnL (BTC)", format_btc(k["pnl"]),
-                 delta=(format_btc(k["delta_pnl_btc"]) if k["delta_pnl_btc"] != 0 else None))
-    r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]),
-                 delta=(format_btc(k["delta_fees_btc"]) if k["delta_fees_btc"] != 0 else None))
+# Zorg dat alle schema-kolommen bestaan
+for col in ORDER:
+    if col not in df_raw.columns:
+        df_raw[col] = ""
 
-    # R2 — ROI en winrate
-    r2 = st.columns(3)
-    roi_delta = (f'{k["delta_roi_pp"]:.2f} pp' if k["delta_roi_pp"] is not None and k["delta_roi_pp"] != 0 else None)
-    r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=roi_delta)
-    r2[1].metric("Winnende trades", f'{k["wins"]}')
-    wr_arrow = k.get("winrate_arrow")
-    r2[2].metric("Winrate %", _pct(k["winrate_pct"]), delta=(wr_arrow if wr_arrow else None))
+# Auto-berekeningen per rij
+def compute_row_autos(row: pd.Series) -> pd.Series:
+    entry = _f(row.get(COL["ENTRY"]))
+    sl    = _f(row.get(COL["SL"]))
+    acct  = float(APP.get("account_for_risk", START_UI))
+    risk_pct = float(APP.get("risk_pct", 0.01))
+    rounding = str(APP.get("risk_rounding","floor"))
+    risk_btc, contracts = compute_risk_contracts(acct, risk_pct, entry, sl, rounding=rounding)
+    # RR (Plan)
+    side = str(row.get(COL["SIDE"]) or "").strip().lower()
+    tp_vals = [_f(row.get(COL["TP1"])), _f(row.get(COL["TP2"])), _f(row.get(COL["TP3"]))]
+    sl_eq_entry = (entry is not None and sl is not None and entry == sl)
+    rr_plan = None
+    if not sl_eq_entry and entry is not None and sl is not None:
+        cands = []
+        for tp in tp_vals:
+            if tp is None: continue
+            if side == "short":
+                rr = (entry - tp) / abs(entry - sl)
+            else:  # default long
+                rr = (tp - entry) / abs(entry - sl)
+            cands.append(rr)
+        rr_plan = max(cands) if cands else None
+    # RR (Actueel) = (ΣTP-PNL − Fees) / risk_btc  (Exit negeren)
+    pnl_tp = sum([x for x in [ _f(row.get(COL["PNL_TP1"])), _f(row.get(COL["PNL_TP2"])), _f(row.get(COL["PNL_TP3"])) ] if x is not None])
+    fees = _f(row.get(COL["FEES"])) or 0.0
+    rr_actual = None if not risk_btc else ( (pnl_tp - fees) / risk_btc )
+    # Schrijf terug in zichtbare kolommen
+    row[COL["RISK_BTC"]]      = "n.v.t." if risk_btc is None else f"{risk_btc:.6f}"
+    row[COL["CONTRACT_SIZE"]] = "" if contracts is None else int(contracts)
+    row[COL["RR_PLAN"]]       = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
+    # kleur doen we in dataframe styling; hier text
+    row[COL["RR_ACTUAL"]]     = "n.v.t." if rr_actual is None else f"{rr_actual:.2f}"
+    return row
 
-    if df_filtered.empty:
-        st.info("Nog geen trades in selectie.")
-    st.divider()
+df_auto = df_raw.apply(compute_row_autos, axis=1)
 
-    # Tabel
-    vis_cols = [
-        COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
-        COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
-        COL["TP2"], COL["PNL_TP2"], COL["TP3"], COL["PNL_TP3"],
-        COL["PNL_EXIT"], COL["FEES"], COL["EMOTIES"],
-        "Plan_preview", "Notities_preview", "🖼️",
-    ]
-    df_view = df_filtered.copy()
-    df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
-    df_view["Plan_preview"]     = df_view[COL["PLAN"]].apply(lambda x: _short(x, 60))
-    df_view["Notities_preview"] = df_view[COL["NOTES"]].apply(lambda x: _short(x, 60))
-    df_view["🖼️"] = df_view[COL["SHOTS"]].apply(lambda x: "🖼️" if str(x).strip() else "")
-    for col in vis_cols:
-        if col not in df_view.columns: df_view[col] = ""
-    table_df = df_view[vis_cols].reset_index(drop=True)
+# ------- Filters toepassen (overlaywaarden) -------
+filt = APP.get("filters", {"periode":"Alle","search":"","tags":"","emoties":[]})
+df_filtered = apply_filters(df_auto, search=filt.get("search",""), tags_csv=filt.get("tags",""),
+                            emoties=filt.get("emoties", []), periode=filt.get("periode","Alle"))
 
-    pnl_cols = [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
-    fmt_map = {c: (lambda v: format_btc(v) if pd.notna(v) and str(v) != "" else "—") for c in pnl_cols + [COL["FEES"]]}
+# ------- KPI-balk (delta's = laatste trade) -------
+k = compute_kpis(df_filtered, start_btc=START_UI)
+def _pct(x): return "—" if x is None else f"{x:.2f}%"
 
-    try:
-        styled = table_df.style.map(
-            lambda x: "color: green;" if _to_num(x) > 0 else ("color: red;" if _to_num(x) < 0 else ""),
-            subset=pnl_cols
-        ).format(fmt_map, na_rep="—")
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    except Exception:
-        st.dataframe(table_df, use_container_width=True, hide_index=True)
+r1 = st.columns(4)
+r1[0].metric("Startkapitaal (BTC)", format_btc(k["start"]))
+r1[1].metric("Actueel kapitaal (BTC)", format_btc(k["actueel"]),
+             delta=(format_btc(k["delta_actueel_btc"]) if k["delta_actueel_btc"]!=0 else None))
+r1[2].metric("Totale PnL (BTC)", format_btc(k["pnl"]),
+             delta=(format_btc(k["delta_pnl_btc"]) if k["delta_pnl_btc"]!=0 else None))
+r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]),
+             delta=(format_btc(k["delta_fees_btc"]) if k["delta_fees_btc"]!=0 else None))
+r2 = st.columns(3)
+roi_delta = (f'{k["delta_roi_pp"]:.2f} pp' if k["delta_roi_pp"] not in (None,0) else None)
+r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=roi_delta)
+r2[1].metric("Winnende trades", f'{k["wins"]}')
+r2[2].metric("Winrate %", _pct(k["winrate_pct"]), delta=(k["winrate_arrow"] if k.get("winrate_arrow") else None))
 
-    # ---- Invoeren
-    with st.expander("🆕 Trades invoeren", expanded=False):
-        with st.form(key="form_add"):
-            c1, c2 = st.columns(2)
-            with c1:
-                d_datum = st.date_input(COL["DATUM"])
-                d_id    = st.text_input("ID (Trade_ID)")
-                d_setup = st.selectbox(COL["SETUP"], SETUP_OPTS)
-                d_custom= st.text_input("Custom setup") if d_setup == "Anders/Custom" else ""
-                d_contract = st.text_input(COL["CONTRACT_SIZE"])
-                d_rr   = st.text_input(COL["RR"])
-                d_entry= st.text_input(COL["ENTRY"])
-                d_sl   = st.text_input(COL["SL"])
-                d_tp1  = st.text_input(COL["TP1"])
-                d_p1   = st.text_input(COL["PNL_TP1"])
-            with c2:
-                d_tp2  = st.text_input(COL["TP2"])
-                d_p2   = st.text_input(COL["PNL_TP2"])
-                d_tp3  = st.text_input(COL["TP3"])
-                d_p3   = st.text_input(COL["PNL_TP3"])
-                d_px   = st.text_input(COL["PNL_EXIT"])
-                d_fees = st.text_input(COL["FEES"])
-                d_em   = st.text_input(COL["EMOTIES"])
-                d_plan = st.text_area(COL["PLAN"])
-                d_note = st.text_area(COL["NOTES"])
-                d_shot = st.text_input(COL["SHOTS"])
-            add_btn = st.form_submit_button("Opslaan (nieuw)", type="primary")
-        if add_btn:
-            setup_value = d_custom.strip() if d_setup == "Anders/Custom" and d_custom else d_setup
-            new = {
-                COL["DATUM"]: pd.to_datetime(d_datum).strftime(DATE_FMT),
-                COL["TRADE_ID"]: d_id.strip(),
-                COL["SETUP"]: setup_value, COL["TFS"]: "",
-                COL["CONTRACT_SIZE"]: d_contract, COL["RR"]: d_rr,
-                COL["ENTRY"]: d_entry, COL["SL"]: d_sl, COL["TP"]: "",
-                COL["TP1"]: d_tp1, COL["TP2"]: d_tp2, COL["TP3"]: d_tp3,
-                COL["PNL_TP1"]: d_p1, COL["PNL_TP2"]: d_p2, COL["PNL_TP3"]: d_p3, COL["PNL_EXIT"]: d_px,
-                COL["PNL_TOTAL"]: "",  # berekenen bij load
-                COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: d_fees, COL["ACCOUNT"]: "",
-                COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: d_em, COL["PLAN"]: d_plan, COL["NOTES"]: d_note, COL["SHOTS"]: d_shot
-            }
+st.divider()
+if df_filtered.empty:
+    st.info("Nog geen trades in selectie.")
+# ------- Zichtbare kolommen & tooltips -------
+vis_cols = [
+    COL["DATUM"], "ID", COL["SIDE"], COL["SETUP"],
+    COL["RISK_BTC"], COL["CONTRACT_SIZE"], COL["RR_PLAN"], COL["RR_ACTUAL"],
+    COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
+    COL["FEES"], COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"],
+    COL["EMOTIES"], COL["TAGS"], COL["SHOTS"],
+]
+df_view = df_filtered.copy()
+df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
+
+for col in vis_cols:
+    if col not in df_view.columns: df_view[col] = ""
+
+# Kolom-config (tooltips/helptxt)
+colcfg = {
+    COL["RISK_BTC"]: st.column_config.TextColumn(COL["RISK_BTC"], help="BTC"),
+    COL["CONTRACT_SIZE"]: st.column_config.NumberColumn(COL["CONTRACT_SIZE"], help="contracts", step=1),
+    COL["FEES"]: st.column_config.NumberColumn(COL["FEES"], help="BTC"),
+    COL["ENTRY"]: st.column_config.NumberColumn(COL["ENTRY"], help="prijs"),
+    COL["SL"]:    st.column_config.NumberColumn(COL["SL"], help="prijs"),
+    COL["TP1"]:   st.column_config.NumberColumn(COL["TP1"], help="prijs"),
+    COL["TP2"]:   st.column_config.NumberColumn(COL["TP2"], help="prijs"),
+    COL["TP3"]:   st.column_config.NumberColumn(COL["TP3"], help="prijs"),
+    COL["RR_PLAN"]:   st.column_config.TextColumn(COL["RR_PLAN"], help="Max van TP’s; n.v.t. als SL=Entry of geen TP"),
+    COL["RR_ACTUAL"]: st.column_config.TextColumn(COL["RR_ACTUAL"], help="(ΣTP-PNL − Fees) / risk_btc; Exit telt niet mee"),
+}
+
+# Bewerken toggle (keyboard-first: zet uit/aan)
+edit_mode = st.toggle("✎ Bewerken/Toevoegen inschakelen", value=False, help="Zet aan om rijen inline te wijzigen of toe te voegen (ghost row).")
+edited = st.data_editor(
+    df_view[vis_cols].reset_index(drop=True),
+    use_container_width=True,
+    hide_index=True,
+    column_config=colcfg,
+    disabled=not edit_mode,
+    num_rows=("dynamic" if edit_mode else "fixed"),  # ghost row
+    key="journal_editor",
+)
+
+st.caption("Tip: Tab/Shift+Tab navigeert; Enter bevestigt cel; ‘✎ Bewerken’ aan voor ghost row / inline bewerken.")
+
+# ------- Wijzigingen detecteren & opslaan -------
+def _norm(s):  # normaliseer lege strings naar ""
+    return "" if s is None else (str(s) if not isinstance(s, str) else s)
+
+def df_keyed(df):
+    # maak dictionary per Trade_ID
+    m = {}
+    for _, r in df.iterrows():
+        tid = str(r.get("ID","")).strip() or str(r.get(COL["TRADE_ID"], "")).strip()
+        if not tid: continue
+        m[tid] = r
+    return m
+
+if edit_mode:
+    colA, colB, colC = st.columns(3)
+    do_save = colA.button("💾 Opslaan wijzigingen", type="primary")
+    to_delete = colB.text_input("Verwijder Trade_ID (exact)")
+    do_delete = colC.button("🗑️ Verwijderen")
+    if do_delete and to_delete.strip():
+        try:
+            delete_entry(to_delete.strip())
+            st.success(f"Verwijderd: {to_delete.strip()}")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
+
+    if do_save:
+        # Vergelijk met originele gefilterde set per ID (simpelste aanpak: schrijf wijzigingen rechtstreeks terug in journal df_raw)
+        base_all = load_journal()
+        base_map = df_keyed(df_view)
+        new_map  = df_keyed(edited)
+
+        # Updates + Adds
+        for tid, row in new_map.items():
+            exists = tid in base_map
+            # Zet terug naar schema-kolommen
+            out = {k: "" for k in ORDER}
+            out.update({COL["TRADE_ID"]: tid})
+            # Map zichtbare → dataset kolommen
+            out[COL["DATUM"]] = pd.to_datetime(row.get(COL["DATUM"]) or pd.Timestamp.today()).strftime(DATE_FMT)
+            out[COL["SIDE"]]  = str(row.get(COL["SIDE"]) or "").strip()
+            out[COL["SETUP"]] = str(row.get(COL["SETUP"]) or "").strip()
+            out[COL["ENTRY"]] = row.get(COL["ENTRY"], "")
+            out[COL["SL"]]    = row.get(COL["SL"], "")
+            out[COL["TP1"]]   = row.get(COL["TP1"], "")
+            out[COL["TP2"]]   = row.get(COL["TP2"], "")
+            out[COL["TP3"]]   = row.get(COL["TP3"], "")
+            out[COL["FEES"]]  = row.get(COL["FEES"], "")
+            out[COL["PNL_TP1"]] = row.get(COL["PNL_TP1"], "")
+            out[COL["PNL_TP2"]] = row.get(COL["PNL_TP2"], "")
+            out[COL["PNL_TP3"]] = row.get(COL["PNL_TP3"], "")
+            out[COL["PNL_EXIT"]] = row.get(COL["PNL_Exit"], row.get(COL["PNL_EXIT"], ""))
+            out[COL["EMOTIES"]]  = row.get(COL["EMOTIES"], "")
+            out[COL["TAGS"]]     = row.get(COL["TAGS"], "")
+            out[COL["SHOTS"]]    = row.get(COL["SHOTS"], "")
+            # autos velden worden bij load weer berekend; toch meeschrijven ter volledigheid:
+            out[COL["RISK_BTC"]]      = row.get(COL["RISK_BTC"], "")
+            out[COL["CONTRACT_SIZE"]] = row.get(COL["CONTRACT_SIZE"], "")
+            out[COL["RR_PLAN"]]       = row.get(COL["RR_PLAN"], "")
+            out[COL["RR_ACTUAL"]]     = row.get(COL["RR_ACTUAL"], "")
+
             try:
-                tid = append_entry(new)
-                if APP.get("gh_sync_enabled", False):
-                    ok, msg = github_sync.sync_now(); st.info(msg)
-                st.success(f"Toegevoegd ✅ (Trade_ID: {tid})")
-                st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    # ---- Bewerken/verwijderen
-    with st.expander("✏️ Trades bewerken/verwijderen", expanded=False):
-        trade_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
-        sel_tid = st.selectbox("Selecteer Trade_ID", ["(geen)"] + trade_ids, index=0)
-        initial = df_filtered[df_filtered[COL["TRADE_ID"]].astype(str) == sel_tid].iloc[0].to_dict() if sel_tid != "(geen)" else {c:"" for c in ORDER}
-
-        with st.form(key="form_edit"):
-            c1, c2 = st.columns(2)
-            with c1:
-                e_datum = st.date_input(COL["DATUM"], value=pd.to_datetime(initial.get(COL["DATUM"]) or pd.Timestamp.now()).date())
-                e_id    = st.text_input("ID (Trade_ID)", value=str(initial.get(COL["TRADE_ID"], "")))
-                e_setup = st.selectbox(COL["SETUP"], SETUP_OPTS, index=(SETUP_OPTS.index(initial.get(COL["SETUP"])) if initial.get(COL["SETUP"]) in SETUP_OPTS else 0))
-                e_custom= st.text_input("Custom setup", value="" if e_setup!="Anders/Custom" else ("" if initial.get(COL["SETUP"]) in SETUP_OPTS else str(initial.get(COL["SETUP"])) ))
-                e_contract = st.text_input(COL["CONTRACT_SIZE"], value=str(initial.get(COL["CONTRACT_SIZE"], "")))
-                e_rr   = st.text_input(COL["RR"], value=str(initial.get(COL["RR"], "")))
-                e_entry= st.text_input(COL["ENTRY"], value=str(initial.get(COL["ENTRY"], "")))
-                e_sl   = st.text_input(COL["SL"], value=str(initial.get(COL["SL"], "")))
-                e_tp1  = st.text_input(COL["TP1"], value=str(initial.get(COL["TP1"], "")))
-                e_p1   = st.text_input(COL["PNL_TP1"], value=str(initial.get(COL["PNL_TP1"], "")))
-            with c2:
-                e_tp2  = st.text_input(COL["TP2"], value=str(initial.get(COL["TP2"], "")))
-                e_p2   = st.text_input(COL["PNL_TP2"], value=str(initial.get(COL["PNL_TP2"], "")))
-                e_tp3  = st.text_input(COL["TP3"], value=str(initial.get(COL["TP3"], "")))
-                e_p3   = st.text_input(COL["PNL_TP3"], value=str(initial.get(COL["PNL_TP3"], "")))
-                e_px   = st.text_input(COL["PNL_EXIT"], value=str(initial.get(COL["PNL_EXIT"], "")))
-                e_fees = st.text_input(COL["FEES"], value=str(initial.get(COL["FEES"], "")))
-                e_em   = st.text_input(COL["EMOTIES"], value=str(initial.get(COL["EMOTIES"], "")))
-                e_plan = st.text_area(COL["PLAN"], value=str(initial.get(COL["PLAN"], "")))
-                e_note = st.text_area(COL["NOTES"], value=str(initial.get(COL["NOTES"], "")))
-                e_shot = st.text_input(COL["SHOTS"], value=str(initial.get(COL["SHOTS"], "")))
-
-            colA, colB, colC = st.columns(3)
-            do_update = colA.form_submit_button("Wijzigen", type="primary", disabled=(sel_tid=="(geen)"))
-            do_delete = colB.form_submit_button("Verwijderen", disabled=(sel_tid=="(geen)"))
-            confirm   = colC.checkbox("Bevestig verwijderen")
-
-        if do_update and sel_tid != "(geen)":
-            setup_value = e_custom.strip() if e_setup == "Anders/Custom" and e_custom else e_setup
-            upd = {
-                COL["DATUM"]: pd.to_datetime(e_datum).strftime(DATE_FMT),
-                COL["TRADE_ID"]: e_id.strip(),
-                COL["SETUP"]: setup_value, COL["TFS"]: "",
-                COL["CONTRACT_SIZE"]: e_contract, COL["RR"]: e_rr,
-                COL["ENTRY"]: e_entry, COL["SL"]: e_sl, COL["TP"]: "",
-                COL["TP1"]: e_tp1, COL["TP2"]: e_tp2, COL["TP3"]: e_tp3,
-                COL["PNL_TP1"]: e_p1, COL["PNL_TP2"]: e_p2, COL["PNL_TP3"]: e_p3, COL["PNL_EXIT"]: e_px,
-                COL["PNL_TOTAL"]: "",  # herberekenen bij load
-                COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: e_fees, COL["ACCOUNT"]: "",
-                COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: e_em, COL["PLAN"]: e_plan, COL["NOTES"]: e_note, COL["SHOTS"]: e_shot
-            }
-            try:
-                if e_id.strip() != sel_tid:
-                    if (load_journal()[COL["TRADE_ID"]].astype(str) == e_id.strip()).any():
-                        st.error(f"Trade_ID bestaat al: {e_id.strip()}")
-                    else:
-                        from journal_store import append_entry as _append, delete_entry as _del
-                        _append(upd); _del(sel_tid)
-                        st.success(f"Gewijzigd ✅ (Trade_ID → {e_id.strip()})")
+                if exists:
+                    update_entry(tid, out)
                 else:
-                    update_entry(sel_tid, upd)
-                    st.success("Gewijzigd ✅")
-                if APP.get("gh_sync_enabled", False):
-                    ok, msg = github_sync.sync_now(); st.info(msg)
-                st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
+                    append_entry(out)
             except Exception as e:
-                st.error(str(e))
+                st.error(f"Kon {tid} niet opslaan: {e}")
 
-        if do_delete and sel_tid != "(geen)" and confirm:
-            try:
-                delete_entry(sel_tid)
-                st.success("Verwijderd ✅")
-                if APP.get("gh_sync_enabled", False):
-                    ok, msg = github_sync.sync_now(); st.info(msg)
-                st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
-            except Exception as e:
-                st.error(str(e))
+        st.success("Wijzigingen opgeslagen ✅")
+        if APP.get("gh_sync_enabled", False):
+            ok, msg = github_sync.sync_now(); st.info(msg)
+        st.rerun()
 
-    if st.button("Exporteer zichtbare rijen (.csv)"):
-        out = export_visible(df_filtered)
-        st.success(f"Export voltooid: `{out}`")
+# ------- Export knop -------
+if st.button("Exporteer zichtbare rijen (.csv)"):
+    out = export_visible(df_filtered)
+    st.success(f"Export voltooid: `{out}`")
+
+# ------- Settings / Backup paneel onderaan (compact) -------
+st.divider()
+with st.expander("Settings & Back-up"):
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
+        if st.button("Opslaan (Startkapitaal)"):
+            APP["start_kapitaal"] = float(start_val); save_state(APP); st.success("Startkapitaal opgeslagen"); st.rerun()
+    with c2:
+        ok, msg = github_sync.test_connection(
+            github_sync.GhSettings(APP.get("gh_sync_enabled", False), APP.get("gh_repo",""), APP.get("gh_branch","main"), APP.get("gh_dir","data"))
+        )
+        st.caption("GitHub: " + ("OK" if ok else "Niet geconfigureerd"))
+        if st.button("☁️ Back-up nu"):
+            save_state(APP)
+            ok2, msg2 = github_sync.sync_now(force=True)
+            st.success(msg2) if ok2 else st.error(msg2)
+    with c3:
+        blob = make_backup_zip()
+        st.download_button("📦 Download back-up (.zip)", data=blob, file_name="bitpilot-backup.zip", mime="application/zip")
+    with c4:
+        st.caption("Herstel (lokaal)")
+        ext = st.selectbox("Type", [".csv",".json"])
+        choices = list_local_backups(ext=ext)
+        if choices:
+            idx = st.selectbox("Back-up", list(range(len(choices))), format_func=lambda i: choices[i].name)
+            if st.button("♻️ Herstel"):
+                ok3, msg3 = restore_from_backup(choices[int(idx)])
+                st.success(msg3) if ok3 else st.error(msg3)
+                st.rerun()
+        else:
+            st.caption("Geen lokale back-ups")
+
