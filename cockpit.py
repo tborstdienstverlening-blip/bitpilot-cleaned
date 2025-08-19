@@ -153,7 +153,7 @@ with tab_journal:
         df_all,
         search=st.session_state.get("f_search"),
         tags_csv=st.session_state.get("f_tags"),
-        emociones := st.session_state.get("f_emotie_sel", []),
+        emoties=st.session_state.get("f_emotie_sel", []),  # <-- FIX: keywordargument, geen walrus
         periode=st.session_state.get("f_periode", "Alle"),
     )
 
@@ -172,12 +172,11 @@ with tab_journal:
     r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]),
                  delta=(format_btc(k["delta_fees_btc"]) if k["delta_fees_btc"] != 0 else None))
 
-    # R2 — ROI en winrates (Rolling verwijderd)
+    # R2 — ROI en winrate
     r2 = st.columns(3)
     roi_delta = (f'{k["delta_roi_pp"]:.2f} pp' if k["delta_roi_pp"] is not None and k["delta_roi_pp"] != 0 else None)
     r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=roi_delta)
     r2[1].metric("Winnende trades", f'{k["wins"]}')
-    # Winrate pijltje ↑/↓ afhankelijk van laatste trade
     wr_arrow = k.get("winrate_arrow")
     r2[2].metric("Winrate %", _pct(k["winrate_pct"]), delta=(wr_arrow if wr_arrow else None))
 
@@ -185,7 +184,7 @@ with tab_journal:
         st.info("Nog geen trades in selectie.")
     st.divider()
 
-    # Tabel (same as eerder)
+    # Tabel
     vis_cols = [
         COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
         COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
