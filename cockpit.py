@@ -3,7 +3,6 @@ import time
 import numpy as np
 import streamlit as st
 import pandas as pd
-from pathlib import Path
 
 from schema import COL, ORDER, DATE_FMT, SETUP_OPTS
 from utils_config import load_config, format_btc
@@ -12,11 +11,12 @@ from import_export import export_visible
 from app_state import load_state, save_state
 from backup_utils import make_backup_zip, list_local_backups, restore_from_backup
 import github_sync
+from kpi_utils import with_pnl_total, apply_filters, compute_kpis
 
 # Page config zo vroeg mogelijk (JS-fix)
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
 
-# Healthcheck optioneel
+# Healthcheck optioneel (nu verplaatst naar Settings)
 try:
     import healthcheck
 except Exception:
@@ -25,6 +25,7 @@ except Exception:
 CFG = load_config()
 APP = load_state()
 START_UI = APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0))
+ROLLING_N = int(APP.get("rolling_n", 20) or 20)
 
 # -------- Helpers --------
 def _to_num(s) -> float:
@@ -37,25 +38,7 @@ def _short(txt: str, n=60):
     txt = str(txt or "")
     return txt if len(txt) <= n else txt[:n] + "…"
 
-def calc_row_pnl(row) -> float:
-    cols = [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
-    vals = []
-    for c in cols:
-        v = row.get(c, 0)
-        try:
-            v = float(str(v).replace(",", ".")) if str(v).strip() != "" else 0.0
-        except Exception:
-            v = 0.0
-        vals.append(v)
-    return float(np.nansum(vals))
-
-def _kpis_btc(df: pd.DataFrame, start_btc: float) -> dict:
-    pnl_total = pd.to_numeric(df.get(COL["PNL_TOTAL"], pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-    fees = pd.to_numeric(df.get(COL["FEES"], pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-    actuel = float(start_btc) + float(pnl_total) - float(fees)
-    return {"start": float(start_btc), "pnl": float(pnl_total), "fees": float(fees), "actueel": float(actuel)}
-
-# -------- Sidebar filters (met vaste keys) --------
+# -------- Sidebar filters (zelfde keys als voorheen) --------
 DEFAULTS = dict(
     f_portefeuille="Alle",
     f_periode="Alle",
@@ -75,10 +58,10 @@ with st.sidebar:
     st.multiselect("Categorie", ["BTC","Equities","FX","Commodities"], key="f_categorie")
     st.text_input("🔍 Zoek (Trade_ID of Tags)", key="f_search")
     st.text_input("🔖 Tags (comma)", key="f_tags")
-    st.multiselect("Emoties", ["Kalm","Twijfel","Stress"], key="f_emoties")
+    st.multiselect("Emoties", ["Kalm","Twijfel","Stress"], key="f_emotie_sel")
     st.button("Reset filters", on_click=reset_filters)
 
-# -------- Statusbalk rechtsboven --------
+# -------- Top status (rechts) --------
 last_save = get_last_save_ts()
 last_sync_ts = APP.get("last_sync_ts", "")
 last_sync_msg = APP.get("last_sync_msg", "Sync uit")
@@ -90,13 +73,18 @@ with scol3: st.caption(f"☁️ Laatste sync: {last_sync_ts or '—'} ({last_syn
 tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
 
 # =======================
-# Settings-tab
+# Settings-tab (incl. tech-info en Rolling N)
 # =======================
 with tab_settings:
     st.subheader("Instellingen")
-    start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
+    c1, c2 = st.columns(2)
+    with c1:
+        start_val = st.number_input("Startkapitaal (BTC)", min_value=0.0, step=0.000001, value=float(START_UI))
+    with c2:
+        rolling_val = st.number_input("Rolling winrate — N trades", min_value=5, max_value=200, step=1, value=int(ROLLING_N))
     if st.button("💾 Opslaan (Settings)"):
         APP["start_kapitaal"] = float(start_val)
+        APP["rolling_n"] = int(rolling_val)
         save_state(APP)
         st.success("Settings opgeslagen. Herberekenen…")
         st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
@@ -147,40 +135,61 @@ with tab_settings:
     else:
         st.info("Geen lokale back-ups gevonden in data/.bak/")
 
-# =======================
-# Journal-tab
-# =======================
-with tab_journal:
-    st.title("Journal — Overzicht + CRUD")
-
+    st.divider()
+    st.subheader("Systeeminfo")
     if healthcheck and hasattr(healthcheck, "report"):
         rep = healthcheck.report()
-        c0, c1, c2, c3, c4 = st.columns(5)
-        c0.metric("Python", rep.get("python","?"))
-        c1.metric("Denominatie", rep.get("denom","BTC"))
-        c2.metric("Start (BTC)", format_btc(START_UI))
-        c3.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
-        c4.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
+        s0, s1, s2 = st.columns(3)
+        s0.metric("Python", rep.get("python","?"))
+        s1.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
+        s2.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
+    else:
+        st.caption("Healthcheck niet beschikbaar.")
 
-    # Data + PNL_TOTAL + sort + zoek
+# =======================
+# Journal-tab (KPI-balk BOVEN, daarna tabel + blokken)
+# =======================
+with tab_journal:
+    st.title("Journal")
+
+    # 1) Data laden en filteren
     df_all = load_journal()
-    try:
-        df_all[COL["PNL_TOTAL"]] = df_all.apply(calc_row_pnl, axis=1)
-    except Exception:
-        df_all[COL["PNL_TOTAL"]] = 0.0
-    try:
-        df_all["_dt"] = pd.to_datetime(df_all[COL["DATUM"]], format=DATE_FMT, errors="coerce")
-    except Exception:
-        df_all["_dt"] = pd.to_datetime(df_all[COL["DATUM"]], errors="coerce")
-    df_all = df_all.sort_values("_dt", ascending=False).drop(columns=["_dt"])
+    df_all = with_pnl_total(df_all)
 
-    q = (st.session_state.get("f_search") or "").strip().lower()
-    if q:
-        mask = df_all[COL["TRADE_ID"]].astype(str).str.lower().str.contains(q) | \
-               df_all[COL["TAGS"]].astype(str).str.lower().str.contains(q)
-        df_all = df_all[mask]
+    df_filtered = apply_filters(
+        df_all,
+        search=st.session_state.get("f_search"),
+        tags_csv=st.session_state.get("f_tags"),
+        emoties=st.session_state.get("f_emotie_sel", []),
+        periode=st.session_state.get("f_periode", "Alle"),
+    )
 
-    # Tabel (full-width)
+    # 2) KPI-balk (boven de journal)
+    k = compute_kpis(df_filtered, start_btc=START_UI, rolling_n=ROLLING_N)
+
+    def _pct(x):
+        return "—" if x is None else f"{x:.2f}%"
+
+    # eerste rij
+    r1 = st.columns(4)
+    r1[0].metric("Startkapitaal (BTC)", format_btc(k["start"]))
+    r1[1].metric("Actueel kapitaal (BTC)", format_btc(k["actueel"]),
+                 delta=f'{(k["actueel"]-k["start"]):.6f}' if k["start"] is not None else None)
+    r1[2].metric("Totale PnL (BTC)", format_btc(k["pnl"]), delta=f'{k["pnl"]:.6f}')
+    r1[3].metric("Totale Fees (BTC)", format_btc(k["fees"]), delta=f'{-abs(k["fees"]):.6f}')
+
+    # tweede rij
+    r2 = st.columns(4)
+    r2[0].metric("ROI %", _pct(k["roi_pct"]), delta=f'{k["roi_pct"]:.2f}%' if k["roi_pct"] is not None else None)
+    r2[1].metric("Winnende trades", f'{k["wins"]}')
+    r2[2].metric("Verloren trades", f'{k["losses"]}')
+    r2[3].metric(f"Rolling Winrate % (N={ROLLING_N})", _pct(k["rolling_winrate_pct"]))
+
+    if df_filtered.empty:
+        st.info("Nog geen trades in selectie.")
+    st.divider()
+
+    # 3) Tabel (full-width) — zelfde zichtbare kolommen
     vis_cols = [
         COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
         COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
@@ -188,7 +197,7 @@ with tab_journal:
         COL["PNL_EXIT"], COL["FEES"], COL["EMOTIES"],
         "Plan_preview", "Notities_preview", "🖼️",
     ]
-    df_view = df_all.copy()
+    df_view = df_filtered.copy()
     df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
     df_view["Plan_preview"]     = df_view[COL["PLAN"]].apply(lambda x: _short(x, 60))
     df_view["Notities_preview"] = df_view[COL["NOTES"]].apply(lambda x: _short(x, 60))
@@ -200,7 +209,6 @@ with tab_journal:
     pnl_cols = [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
     fmt_map = {c: (lambda v: format_btc(v) if pd.notna(v) and str(v) != "" else "—") for c in pnl_cols + [COL["FEES"]]}
 
-    # FIX: applymap -> map (deprecation)
     try:
         styled = table_df.style.map(
             lambda x: "color: green;" if _to_num(x) > 0 else ("color: red;" if _to_num(x) < 0 else ""),
@@ -210,16 +218,7 @@ with tab_journal:
     except Exception:
         st.dataframe(table_df, use_container_width=True, hide_index=True)
 
-    # KPI-balk
-    kpis = _kpis_btc(df_all, start_btc=START_UI)
-    st.divider()
-    kc0, kc1, kc2, kc3 = st.columns(4)
-    kc0.metric("Startkapitaal",   format_btc(kpis["start"]))
-    kc1.metric("Actueel kapitaal", format_btc(kpis["actueel"]))
-    kc2.metric("Totale PnL",      format_btc(kpis["pnl"]))
-    kc3.metric("Totale Fees",     format_btc(kpis["fees"]))
-
-    # ---- 🆕 Trades invoeren (met KEY vereist door Streamlit) ----
+    # 4) 🆕 Trades invoeren
     with st.expander("🆕 Trades invoeren", expanded=False):
         with st.form(key="form_add"):
             c1, c2 = st.columns(2)
@@ -256,12 +255,10 @@ with tab_journal:
                 COL["ENTRY"]: d_entry, COL["SL"]: d_sl, COL["TP"]: "",
                 COL["TP1"]: d_tp1, COL["TP2"]: d_tp2, COL["TP3"]: d_tp3,
                 COL["PNL_TP1"]: d_p1, COL["PNL_TP2"]: d_p2, COL["PNL_TP3"]: d_p3, COL["PNL_EXIT"]: d_px,
-                COL["PNL_TOTAL"]: "",  # wordt bij load berekend
+                COL["PNL_TOTAL"]: "",  # berekenen bij load
                 COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: d_fees, COL["ACCOUNT"]: "",
                 COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: d_em, COL["PLAN"]: d_plan, COL["NOTES"]: d_note, COL["SHOTS"]: d_shot
             }
-            _ = [_to_num(new[x]) for x in [COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
-                                           COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], COL["FEES"]]]
             try:
                 tid = append_entry(new)
                 if APP.get("gh_sync_enabled", False):
@@ -271,11 +268,11 @@ with tab_journal:
             except Exception as e:
                 st.error(str(e))
 
-    # ---- ✏️ Trades bewerken/verwijderen (met KEY vereist) ----
+    # 5) ✏️ Trades bewerken/verwijderen
     with st.expander("✏️ Trades bewerken/verwijderen", expanded=False):
-        trade_ids = df_all[COL["TRADE_ID"]].astype(str).tolist()
+        trade_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
         sel_tid = st.selectbox("Selecteer Trade_ID", ["(geen)"] + trade_ids, index=0)
-        initial = df_all[df_all[COL["TRADE_ID"]].astype(str) == sel_tid].iloc[0].to_dict() if sel_tid != "(geen)" else {c:"" for c in ORDER}
+        initial = df_filtered[df_filtered[COL["TRADE_ID"]].astype(str) == sel_tid].iloc[0].to_dict() if sel_tid != "(geen)" else {c:"" for c in ORDER}
 
         with st.form(key="form_edit"):
             c1, c2 = st.columns(2)
@@ -317,12 +314,10 @@ with tab_journal:
                 COL["ENTRY"]: e_entry, COL["SL"]: e_sl, COL["TP"]: "",
                 COL["TP1"]: e_tp1, COL["TP2"]: e_tp2, COL["TP3"]: e_tp3,
                 COL["PNL_TP1"]: e_p1, COL["PNL_TP2"]: e_p2, COL["PNL_TP3"]: e_p3, COL["PNL_EXIT"]: e_px,
-                COL["PNL_TOTAL"]: "",  # wordt bij load berekend
+                COL["PNL_TOTAL"]: "",  # opnieuw berekenen bij load
                 COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: e_fees, COL["ACCOUNT"]: "",
                 COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: e_em, COL["PLAN"]: e_plan, COL["NOTES"]: e_note, COL["SHOTS"]: e_shot
             }
-            _ = [_to_num(upd[x]) for x in [COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
-                                           COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], COL["FEES"]]]
             try:
                 if e_id.strip() != sel_tid:
                     if (load_journal()[COL["TRADE_ID"]].astype(str) == e_id.strip()).any():
@@ -352,5 +347,6 @@ with tab_journal:
 
     # Export
     if st.button("Exporteer zichtbare rijen (.csv)"):
-        out = export_visible(df_all)
+        out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
+
