@@ -5,23 +5,25 @@ COL = {
     "SETUP": "Setup_type",
     "TFS": "Gebruikte_TFs",
 
-    "CONTRACT_SIZE": "Contract_size",   # NIEUW
-    "RR": "RR",                         # NIEUW
+    "CONTRACT_SIZE": "Contract_size",
+    "RR": "RR",
 
     "ENTRY": "Entry",
     "SL": "StopLoss",
-    "TP": "TakeProfit",                 # blijft bestaan (legacy)
+    "TP": "TakeProfit",                 # legacy veld, blijft bestaan
 
-    "TP1": "TP1",                       # NIEUW
-    "TP2": "TP2",                       # NIEUW
-    "TP3": "TP3",                       # NIEUW
-    "PNL_TP1": "PNL_TP1",               # NIEUW (BTC)
-    "PNL_TP2": "PNL_TP2",               # NIEUW (BTC)
-    "PNL_TP3": "PNL_TP3",               # NIEUW (BTC)
-    "PNL_EXIT": "PNL_Exit",             # NIEUW (BTC, uiteindelijke exit)
+    "TP1": "TP1",
+    "TP2": "TP2",
+    "TP3": "TP3",
+    "PNL_TP1": "PNL_TP1",               # BTC
+    "PNL_TP2": "PNL_TP2",               # BTC
+    "PNL_TP3": "PNL_TP3",               # BTC
+    "PNL_EXIT": "PNL_Exit",             # BTC (uiteindelijke exit)
 
-    "RISICO_R": "Risico_R",             # blijft bestaan
-    "PNL": "PnL",                       # totaal PnL (BTC)
+    "PNL_TOTAL": "PNL_Total",           # NIEUW (verborgen in tabel, wel in export)
+
+    "RISICO_R": "Risico_R",
+    "PNL": "PnL",                       # totaal PnL (blijft voor compat)
     "ROI": "ROI",
     "FEES": "Fees",                     # BTC
     "ACCOUNT": "Accountwaarde",
@@ -33,13 +35,14 @@ COL = {
     "SHOTS": "Screenshots",
 }
 
-# CSV/Export vaste kolomvolgorde (bevat ALLES, inclusief niet-zichtbare)
+# CSV/Export vaste kolomvolgorde (bevat ALLES, incl. PNL_Total en niet-zichtbaren)
 ORDER = [
     COL["DATUM"], COL["TRADE_ID"], COL["SETUP"], COL["TFS"],
     COL["CONTRACT_SIZE"], COL["RR"],
     COL["ENTRY"], COL["SL"], COL["TP"],
     COL["TP1"], COL["TP2"], COL["TP3"],
     COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"],
+    COL["PNL_TOTAL"],
     COL["RISICO_R"], COL["PNL"], COL["ROI"], COL["FEES"], COL["ACCOUNT"],
     COL["WIN"], COL["TAGS"], COL["EMOTIES"], COL["PLAN"], COL["NOTES"], COL["SHOTS"],
 ]
