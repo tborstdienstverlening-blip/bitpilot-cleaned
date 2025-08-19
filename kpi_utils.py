@@ -1,4 +1,4 @@
-# kpi_utils.py — filters + KPI's (R0.2-04g/04h)
+# kpi_utils.py — filters + KPI's (R0.2-04m)
 from __future__ import annotations
 import pandas as pd
 import numpy as np
@@ -23,7 +23,7 @@ def ensure_dt(df: pd.DataFrame) -> pd.DataFrame:
         df2["_dt"] = pd.to_datetime(df2[COL["DATUM"]], errors="coerce")
     return df2
 
-# ---- per-rij totals (voor KPI/winrate)
+# ---- per-rij totals voor KPI/winrate
 def row_tp_sum_present(row: dict) -> tuple[bool, float]:
     tps = [_maybe_num(row.get(COL["PNL_TP1"])),
            _maybe_num(row.get(COL["PNL_TP2"])),
@@ -51,7 +51,7 @@ def _period_bounds(kind: str):
     if kind == "WTD": return today - pd.Timedelta(days=today.weekday()), None
     return None, None
 
-def apply_filters(df: pd.DataFrame, search="", tags_csv="", emoties=None, periode="Alle") -> pd.DataFrame:
+def apply_filters(df: pd.DataFrame, search="", emoties=None, periode="Alle") -> pd.DataFrame:
     df2 = ensure_dt(df)
     if periode in {"YTD","MTD","WTD"}:
         start, _ = _period_bounds(periode)
@@ -59,23 +59,14 @@ def apply_filters(df: pd.DataFrame, search="", tags_csv="", emoties=None, period
             df2 = df2[df2["_dt"] >= start]
     q = (search or "").strip().lower()
     if q:
-        m = df2[COL["TRADE_ID"]].astype(str).str.lower().str.contains(q) | \
-            df2[COL["TAGS"]].astype(str).str.lower().str.contains(q)
+        m = df2[COL["TRADE_ID"]].astype(str).str.lower().str.contains(q)
         df2 = df2[m]
-    tags = [t.strip().lower() for t in (tags_csv or "").split(",") if t.strip()]
-    if tags:
-        col = df2[COL["TAGS"]].astype(str).str.lower()
-        mask = False
-        for t in tags:
-            mask = mask | col.str.contains(t)
-        df2 = df2[mask]
-    if emoties:
+    if emociones := (emoties or []):
         col = df2[COL["EMOTIES"]].astype(str).str.lower()
         mask = False
-        for e in [x.lower() for x in emoties]:
+        for e in [x.lower() for x in emociones]:
             mask = mask | col.str.contains(e)
         df2 = df2[mask]
-    # sort: Datum DESC, ID DESC (stabiel)
     df2 = df2.sort_values([COL["DATUM"], COL["TRADE_ID"]], ascending=[False, False], kind="mergesort").drop(columns=["_dt"])
     return df2
 
@@ -95,7 +86,7 @@ def compute_kpis(df: pd.DataFrame, start_btc: float) -> dict:
 
     if len(df2) >= 1:
         last = df2.iloc[0].to_dict()
-        last_total = row_total_trade_pnl(last)  # ΣTP of fallback Exit
+        last_total = row_total_trade_pnl(last)  # ΣTP’s of fallback Exit
         last_fees  = _num0(last.get(COL["FEES"]))
         pnl_before  = pnl_total  - last_total
         fees_before = fees_total - last_fees
@@ -104,10 +95,8 @@ def compute_kpis(df: pd.DataFrame, start_btc: float) -> dict:
         delta_roi_pp = None if (roi_before is None or roi_pct is None) else (roi_pct - roi_before)
         winrate_arrow = "↑" if last_total > 0 else "↓"
     else:
-        last_total = 0.0
-        last_fees = 0.0
-        delta_roi_pp = None
-        winrate_arrow = None
+        last_total = 0.0; last_fees = 0.0
+        delta_roi_pp = None; winrate_arrow = None
 
     return {
         "start": float(start_btc),
