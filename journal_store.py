@@ -26,12 +26,10 @@ def load_journal() -> pd.DataFrame:
         df = pd.read_csv(_csv_path())
     except Exception:
         df = pd.DataFrame(columns=ORDER)
-    # kolommen rechttrekken
     for col in ORDER:
         if col not in df.columns:
             df[col] = ""
-    df = df[ORDER]
-    return df
+    return df[ORDER]
 
 def _backup(df: pd.DataFrame):
     try:
@@ -41,13 +39,11 @@ def _backup(df: pd.DataFrame):
         out = bd / f"journal_{ts}.csv"
         df.to_csv(out, index=False)
     except Exception:
-        # backup is best-effort
         pass
 
 def save_journal(df: pd.DataFrame) -> None:
     _ensure_seed()
-    # backup vóór schrijven
-    _backup(df)
+    _backup(df)  # backup vóór schrijven
     tmp = _csv_path().with_suffix(".csv.tmp")
     df[ORDER].to_csv(tmp, index=False)
     tmp.replace(_csv_path())  # atomic rename
@@ -64,13 +60,11 @@ def _next_id(df: pd.DataFrame) -> str:
 
 def append_entry(row: dict) -> str:
     df = load_journal()
-    # vul kolommen en maak Trade_ID indien leeg
     clean = {c: row.get(c, "") for c in ORDER}
     tid = str(clean.get(COL["TRADE_ID"], "")).strip()
     if not tid:
         tid = _next_id(df)
         clean[COL["TRADE_ID"]] = tid
-    # duplicate check
     if (df[COL["TRADE_ID"]].astype(str) == tid).any():
         raise ValueError(f"Trade_ID bestaat al: {tid}")
     df = pd.concat([df, pd.DataFrame([clean])], ignore_index=True)
