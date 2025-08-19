@@ -93,5 +93,219 @@ with tab_settings:
         st.rerun()
     # Hard reload / cache-bust tegen 1Ldio.js
     if cols[1].button("🔄 Hard reload (cache-bust)"):
-        st.experimental_set_query_pa_
+        st.experimental_set_query_params(cb=str(int(time.time())))
+        st.rerun()
 
+# =======================
+# Tab: Journal (full-width tabel; onderaan twee blokken)
+# =======================
+with tab_journal:
+    st.title("Journal — Overzicht + CRUD")
+
+    # Header/Health
+    if healthcheck and hasattr(healthcheck, "report"):
+        rep = healthcheck.report()
+        c0, c1, c2, c3, c4 = st.columns(5)
+        c0.metric("Python", rep.get("python","?"))
+        c1.metric("Denominatie", rep.get("denom","BTC"))
+        c2.metric("Start (BTC)", format_btc(START_UI))
+        c3.metric("AI", "Online" if rep.get("ai",{}).get("online") else rep.get("ai",{}).get("reason","Offline"))
+        c4.metric("Dirs OK", "✅" if rep.get("dirs_ok") else "⚠️")
+
+    # Data laden + sort + zoek
+    df_all = load_journal()
+
+    # Bereken PNL_Total per rij (03e)
+    try:
+        df_all[COL["PNL_TOTAL"]] = df_all.apply(calc_row_pnl, axis=1)
+    except Exception:
+        df_all[COL["PNL_TOTAL"]] = 0.0
+
+    try:
+        df_all["_dt"] = pd.to_datetime(df_all[COL["DATUM"]], format=DATE_FMT, errors="coerce")
+    except Exception:
+        df_all["_dt"] = pd.to_datetime(df_all[COL["DATUM"]], errors="coerce")
+    df_all = df_all.sort_values("_dt", ascending=False).drop(columns=["_dt"])
+
+    q = (st.session_state.get("f_search") or "").strip().lower()
+    if q:
+        mask = df_all[COL["TRADE_ID"]].astype(str).str.lower().str.contains(q) | \
+               df_all[COL["TAGS"]].astype(str).str.lower().str.contains(q)
+        df_all = df_all[mask]
+
+    # --- TABEL FULL-WIDTH: zichtbare kolommen & volgorde (zonder TFs etc.)
+    vis_order_labels = [
+        COL["DATUM"], "ID", COL["SETUP"], COL["CONTRACT_SIZE"], COL["RR"],
+        COL["ENTRY"], COL["SL"], COL["TP1"], COL["PNL_TP1"],
+        COL["TP2"], COL["PNL_TP2"], COL["TP3"], COL["PNL_TP3"],
+        COL["PNL_EXIT"], COL["FEES"], COL["EMOTIES"],
+        "Plan_preview", "Notities_preview", "🖼️",
+    ]
+
+    df_view = df_all.copy()
+    df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
+    df_view["Plan_preview"]     = df_view[COL["PLAN"]].apply(lambda x: _short(x, 60))
+    df_view["Notities_preview"] = df_view[COL["NOTES"]].apply(lambda x: _short(x, 60))
+    df_view["🖼️"] = df_view[COL["SHOTS"]].apply(lambda x: "🖼️" if str(x).strip() else "")
+    for col in vis_order_labels:
+        if col not in df_view.columns:
+            df_view[col] = ""
+    table_df = df_view[vis_order_labels].reset_index(drop=True)
+
+    # Conditional formatting PnL-kolommen (BTC)
+    pnl_cols = [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
+    fmt_map = {c: (lambda v: format_btc(v) if pd.notna(v) and str(v) != "" else "—") for c in pnl_cols + [COL["FEES"]]}
+
+    try:
+        styled = table_df.style.applymap(
+            lambda x: "color: green;" if _to_num(x) > 0 else ("color: red;" if _to_num(x) < 0 else ""),
+            subset=pnl_cols
+        ).format(fmt_map, na_rep="—")
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    except Exception:
+        st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+    # ---------- KPI-balk ONDER DE TABEL (BTC, mét PnL aggregatie 03e)
+    kpis = _kpis_btc(df_all, start_btc=START_UI)
+    st.divider()
+    kc0, kc1, kc2, kc3 = st.columns(4)
+    kc0.metric("Startkapitaal",   format_btc(kpis["start"]))
+    kc1.metric("Actueel kapitaal", format_btc(kpis["actueel"]))
+    kc2.metric("Totale PnL",      format_btc(kpis["pnl"]))
+    kc3.metric("Totale Fees",     format_btc(kpis["fees"]))
+
+    # ---------- BLOK 1: 🆕 Trades invoeren (ingeklapt)
+    with st.expander("🆕 Trades invoeren", expanded=False):
+        with st.form(key="form_add"):
+            c1, c2 = st.columns(2)
+            with c1:
+                d_datum = st.date_input(COL["DATUM"])
+                d_id    = st.text_input("ID (Trade_ID)")
+                d_setup = st.selectbox(COL["SETUP"], SETUP_OPTS)
+                d_custom= st.text_input("Custom setup") if d_setup == "Anders/Custom" else ""
+                d_contract = st.text_input(COL["CONTRACT_SIZE"])
+                d_rr   = st.text_input(COL["RR"])
+                d_entry= st.text_input(COL["ENTRY"])
+                d_sl   = st.text_input(COL["SL"])
+                d_tp1  = st.text_input(COL["TP1"])
+                d_p1   = st.text_input(COL["PNL_TP1"])
+            with c2:
+                d_tp2  = st.text_input(COL["TP2"])
+                d_p2   = st.text_input(COL["PNL_TP2"])
+                d_tp3  = st.text_input(COL["TP3"])
+                d_p3   = st.text_input(COL["PNL_TP3"])
+                d_px   = st.text_input(COL["PNL_EXIT"])
+                d_fees = st.text_input(COL["FEES"])
+                d_em   = st.text_input(COL["EMOTIES"])
+                d_plan = st.text_area(COL["PLAN"])
+                d_note = st.text_area(COL["NOTES"])
+                d_shot = st.text_input(COL["SHOTS"])
+            btn_add = st.form_submit_button("Opslaan (nieuw)", type="primary")
+        if btn_add:
+            setup_value = d_custom.strip() if d_setup == "Anders/Custom" and d_custom else d_setup
+            new = {
+                COL["DATUM"]: pd.to_datetime(d_datum).strftime(DATE_FMT),
+                COL["TRADE_ID"]: d_id.strip(),
+                COL["SETUP"]: setup_value, COL["TFS"]: "",
+                COL["CONTRACT_SIZE"]: d_contract, COL["RR"]: d_rr,
+                COL["ENTRY"]: d_entry, COL["SL"]: d_sl, COL["TP"]: "",
+                COL["TP1"]: d_tp1, COL["TP2"]: d_tp2, COL["TP3"]: d_tp3,
+                COL["PNL_TP1"]: d_p1, COL["PNL_TP2"]: d_p2, COL["PNL_TP3"]: d_p3, COL["PNL_EXIT"]: d_px,
+                COL["PNL_TOTAL"]: "",  # wordt bij load berekend
+                COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: d_fees, COL["ACCOUNT"]: "",
+                COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: d_em, COL["PLAN"]: d_plan, COL["NOTES"]: d_note, COL["SHOTS"]: d_shot
+            }
+            # zachte validatie
+            _ = [_to_num(new[x]) for x in [COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
+                                           COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], COL["FEES"]]]
+            try:
+                tid = append_entry(new)
+                st.success(f"Toegevoegd ✅ (Trade_ID: {tid})")
+                st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    # ---------- BLOK 2: ✏️ Trades bewerken/verwijderen (ingeklapt)
+    with st.expander("✏️ Trades bewerken/verwijderen", expanded=False):
+        # selectie binnen dit blok
+        trade_ids = df_all[COL["TRADE_ID"]].astype(str).tolist()
+        sel_tid = st.selectbox("Selecteer Trade_ID", ["(geen)"] + trade_ids, index=0)
+        if sel_tid != "(geen)":
+            initial = df_all[df_all[COL["TRADE_ID"]].astype(str) == sel_tid].iloc[0].to_dict()
+        else:
+            initial = {c: "" for c in ORDER}
+
+        with st.form(key="form_edit"):
+            c1, c2 = st.columns(2)
+            with c1:
+                e_datum = st.date_input(COL["DATUM"], value=pd.to_datetime(initial.get(COL["DATUM"]) or pd.Timestamp.now()).date())
+                e_id    = st.text_input("ID (Trade_ID)", value=str(initial.get(COL["TRADE_ID"], "")))
+                e_setup = st.selectbox(COL["SETUP"], SETUP_OPTS, index=(SETUP_OPTS.index(initial.get(COL["SETUP"])) if initial.get(COL["SETUP"]) in SETUP_OPTS else 0))
+                e_custom= st.text_input("Custom setup", value="" if e_setup!="Anders/Custom" else ("" if initial.get(COL["SETUP"]) in SETUP_OPTS else str(initial.get(COL["SETUP"])) ))
+                e_contract = st.text_input(COL["CONTRACT_SIZE"], value=str(initial.get(COL["CONTRACT_SIZE"], "")))
+                e_rr   = st.text_input(COL["RR"], value=str(initial.get(COL["RR"], "")))
+                e_entry= st.text_input(COL["ENTRY"], value=str(initial.get(COL["ENTRY"], "")))
+                e_sl   = st.text_input(COL["SL"], value=str(initial.get(COL["SL"], "")))
+                e_tp1  = st.text_input(COL["TP1"], value=str(initial.get(COL["TP1"], "")))
+                e_p1   = st.text_input(COL["PNL_TP1"], value=str(initial.get(COL["PNL_TP1"], "")))
+            with c2:
+                e_tp2  = st.text_input(COL["TP2"], value=str(initial.get(COL["TP2"], "")))
+                e_p2   = st.text_input(COL["PNL_TP2"], value=str(initial.get(COL["PNL_TP2"], "")))
+                e_tp3  = st.text_input(COL["TP3"], value=str(initial.get(COL["TP3"], "")))
+                e_p3   = st.text_input(COL["PNL_TP3"], value=str(initial.get(COL["PNL_TP3"], "")))
+                e_px   = st.text_input(COL["PNL_EXIT"], value=str(initial.get(COL["PNL_EXIT"], "")))
+                e_fees = st.text_input(COL["FEES"], value=str(initial.get(COL["FEES"], "")))
+                e_em   = st.text_input(COL["EMOTIES"], value=str(initial.get(COL["EMOTIES"], "")))
+                e_plan = st.text_area(COL["PLAN"], value=str(initial.get(COL["PLAN"], "")))
+                e_note = st.text_area(COL["NOTES"], value=str(initial.get(COL["NOTES"], "")))
+                e_shot = st.text_input(COL["SHOTS"], value=str(initial.get(COL["SHOTS"], "")))
+
+            colA, colB, colC = st.columns(3)
+            do_update = colA.form_submit_button("Wijzigen", type="primary", disabled=(sel_tid=="(geen)"))
+            do_delete = colB.form_submit_button("Verwijderen", disabled=(sel_tid=="(geen)"))
+            confirm   = colC.checkbox("Bevestig verwijderen")
+
+        if do_update and sel_tid != "(geen)":
+            setup_value = e_custom.strip() if e_setup == "Anders/Custom" and e_custom else e_setup
+            upd = {
+                COL["DATUM"]: pd.to_datetime(e_datum).strftime(DATE_FMT),
+                COL["TRADE_ID"]: e_id.strip(),
+                COL["SETUP"]: setup_value, COL["TFS"]: "",
+                COL["CONTRACT_SIZE"]: e_contract, COL["RR"]: e_rr,
+                COL["ENTRY"]: e_entry, COL["SL"]: e_sl, COL["TP"]: "",
+                COL["TP1"]: e_tp1, COL["TP2"]: e_tp2, COL["TP3"]: e_tp3,
+                COL["PNL_TP1"]: e_p1, COL["PNL_TP2"]: e_p2, COL["PNL_TP3"]: e_p3, COL["PNL_EXIT"]: e_px,
+                COL["PNL_TOTAL"]: "",  # wordt bij load berekend
+                COL["RISICO_R"]: "", COL["PNL"]: "", COL["ROI"]: "", COL["FEES"]: e_fees, COL["ACCOUNT"]: "",
+                COL["WIN"]: "", COL["TAGS"]: "", COL["EMOTIES"]: e_em, COL["PLAN"]: e_plan, COL["NOTES"]: e_note, COL["SHOTS"]: e_shot
+            }
+            _ = [_to_num(upd[x]) for x in [COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
+                                           COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], COL["FEES"]]]
+            try:
+                if e_id.strip() != sel_tid:
+                    # hernoemen met duplicate-check
+                    if (load_journal()[COL["TRADE_ID"]].astype(str) == e_id.strip()).any():
+                        st.error(f"Trade_ID bestaat al: {e_id.strip()}")
+                    else:
+                        from journal_store import append_entry as _append, delete_entry as _del
+                        _append(upd); _del(sel_tid)
+                        st.success(f"Gewijzigd ✅ (Trade_ID → {e_id.strip()})")
+                else:
+                    update_entry(sel_tid, upd)
+                    st.success("Gewijzigd ✅")
+                st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        if do_delete and sel_tid != "(geen)" and confirm:
+            try:
+                delete_entry(sel_tid)
+                st.success("Verwijderd ✅")
+                st.experimental_set_query_params(cb=str(int(time.time()))); st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    # Export zichtbare rijen (neemt ALLE schema-kolommen mee via export_visible)
+    if st.button("Exporteer zichtbare rijen (.csv)"):
+        out = export_visible(df_all)  # export_visible ordent volgens ORDER en vult ontbrekende kolommen aan
+        st.success(f"Export voltooid: `{out}`")
