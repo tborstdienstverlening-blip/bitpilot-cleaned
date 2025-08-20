@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict
+import uuid
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import streamlit as st
 
-from schema import COL, ORDER, DATE_FMT, SETUP_OPTS
+# Project imports (bestaande modules in je repo)
+from schema import COL, ORDER, DATE_FMT
 from utils_config import load_config, format_btc
 from journal_store import (
     load_journal,
@@ -48,11 +51,8 @@ save_state(APP)
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def _to_num(s: Any) -> float | None:
-    """
-    Parse naar float; accepteert komma of punt.
-    Lege/ongeldige waarden -> None.
-    """
+def _to_num(s: Any) -> Optional[float]:
+    """Parse naar float; accepteert komma of punt. Lege/ongeldige waarden -> None."""
     try:
         t = str(s).strip().replace(",", ".")
         return None if t == "" else float(t)
@@ -66,6 +66,26 @@ def _fmt_int_grouped(n: int | float) -> str:
         return f"{int(round(float(n))):,}"
     except Exception:
         return ""
+
+
+def _new_trade_id() -> str:
+    """Unieke, stabiele primaire sleutel voor nieuwe journal-entries."""
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    frag = uuid.uuid4().hex[:6].upper()
+    return f"T{ts}-{frag}"
+
+
+def _row_is_effectively_empty(row: pd.Series) -> bool:
+    """Detecteer lege ghost-row zodat we die niet opslaan."""
+    keys = [COL["SIDE"], COL["RISK_PCT"], COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]
+    for k in keys:
+        v = row.get(k, "")
+        if isinstance(v, str):
+            if v.strip() != "":
+                return False
+        elif pd.notna(v):
+            return False
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -176,7 +196,7 @@ with tab_journal:
         if col not in df_raw.columns:
             df_raw[col] = ""
 
-    # ---- DTYPE FIX: forceer tekstkolommen naar string (voor TextColumn)
+    # Forceer tekstkolommen naar string (voor TextColumn/komma-invoer)
     TEXT_COLS = [
         COL["PLAN"],
         COL["NOTES"],
@@ -189,7 +209,7 @@ with tab_journal:
         if c in df_raw.columns:
             df_raw[c] = pd.Series(df_raw[c], dtype="string").fillna("")
 
-    # Default Risk % en Kapitaal (trade) initialiseren indien leeg
+    # Defaults
     if COL["RISK_PCT"] in df_raw.columns:
         df_raw[COL["RISK_PCT"]] = df_raw[COL["RISK_PCT"]].apply(
             lambda v: (DEFAULT_RISK_PCT if str(v).strip() == "" else v)
@@ -212,7 +232,7 @@ with tab_journal:
             else DEFAULT_RISK_PCT
         )
 
-        # ✅ schaalfix + afronding (logica in risk_utils)
+        # Contracts & Risk (BTC) via risk_utils
         risk_btc, contracts = contracts_from_row(cap, risk_pct_val, entry, sl)
 
         # ✅ Contract Size altijd als hele contracts + duizendtallen tonen
@@ -267,13 +287,7 @@ with tab_journal:
 
     df_auto = df_raw.apply(_row_autos, axis=1)
 
-    # ──────────────────────────────────────────────────────────────────────
     # Dtypes voor view:
-    #   - Laat Entry/SL/TP1-3/Kapitaal expres als string zodat komma-invoer
-    #     geldig blijft in de editor (geen forcering naar float).
-    #   - Contract Size is string (geformatteerd).
-    #   - Numeriek houden we alleen voor velden die het nodig hebben.
-    # ──────────────────────────────────────────────────────────────────────
     NUM_COLS = [
         COL["RISK_PCT"],
         COL["FEES"],
@@ -286,7 +300,7 @@ with tab_journal:
         if c in df_auto.columns:
             df_auto[c] = pd.to_numeric(df_auto[c], errors="coerce")
 
-    # Filters (zonder Tags)
+    # Filters
     filt = APP.get("filters", {"periode": "Alle", "search": "", "emoties": []})
     df_filtered = apply_filters(
         df_auto,
@@ -295,7 +309,7 @@ with tab_journal:
         periode=filt.get("periode", "Alle"),
     )
 
-    # KPI-balk (NETTO: Σ[coalesce(ΣTP, Exit, 0) − Fees])
+    # KPI-balk
     k = compute_kpis(df_filtered, start_btc=START_UI)
 
     def _pct(x):
@@ -363,18 +377,19 @@ with tab_journal:
     ]
 
     df_view = df_filtered.copy()
+    # Toon ID-kolom altijd vanuit Trade_ID
     df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
 
     for col in vis_cols:
         if col not in df_view.columns:
             df_view[col] = ""
 
-    # Zorg dat de invoervelden voor prijzen/kapitaal tekst zijn (voor komma's)
+    # Inputs die komma/punt moeten accepteren als TEXT houden
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
 
-    # Kolomconfig & tooltips
+    # Kolomconfig
     colcfg = {
         COL["SIDE"]: st.column_config.SelectboxColumn(
             COL["SIDE"], options=["Long", "Short"], help="Richting van de trade"
@@ -382,14 +397,12 @@ with tab_journal:
         COL["RISK_PCT"]: st.column_config.NumberColumn(
             COL["RISK_PCT"], help="percentage van Kapitaal (trade)", min_value=0.1, max_value=5.0, step=0.1
         ),
-        # ✅ Input-velden als tekstkolommen i.v.m. komma-ondersteuning
         COL["CAP_TRADE"]: st.column_config.TextColumn(COL["CAP_TRADE"], help="BTC — accepteert '.' of ','"),
         COL["ENTRY"]: st.column_config.TextColumn(COL["ENTRY"], help="prijs — accepteert '.' of ','"),
         COL["SL"]: st.column_config.TextColumn(COL["SL"], help="prijs — accepteert '.' of ','"),
         COL["TP1"]: st.column_config.TextColumn(COL["TP1"], help="prijs — accepteert '.' of ','"),
         COL["TP2"]: st.column_config.TextColumn(COL["TP2"], help="prijs — accepteert '.' of ','"),
         COL["TP3"]: st.column_config.TextColumn(COL["TP3"], help="prijs — accepteert '.' of ','"),
-        # ✅ Contract Size als tekst (geformatteerd met duizendtallen)
         COL["CONTRACT_SIZE"]: st.column_config.TextColumn(
             COL["CONTRACT_SIZE"], help="contracts (Deribit $1/contract) — auto"
         ),
@@ -399,12 +412,8 @@ with tab_journal:
         COL["RR_ACTUAL"]: st.column_config.TextColumn(
             COL["RR_ACTUAL"], help="(ΣTP-PNL − Fees) / (Kapitaal×Risk%) — Exit telt niet mee"
         ),
-        COL["PLAN"]: st.column_config.TextColumn(
-            COL["PLAN"], help="Volledige tekst is te bewerken in de bewerker hieronder"
-        ),
-        COL["NOTES"]: st.column_config.TextColumn(
-            COL["NOTES"], help="Volledige tekst is te bewerken in de bewerker hieronder"
-        ),
+        COL["PLAN"]: st.column_config.TextColumn(COL["PLAN"]),
+        COL["NOTES"]: st.column_config.TextColumn(COL["NOTES"]),
         COL["FEES"]: st.column_config.NumberColumn(COL["FEES"], help="fees (BTC)"),
         COL["PNL_TP1"]: st.column_config.NumberColumn(COL["PNL_TP1"], help="pnl (BTC)"),
         COL["PNL_TP2"]: st.column_config.NumberColumn(COL["PNL_TP2"], help="pnl (BTC)"),
@@ -429,7 +438,7 @@ with tab_journal:
     )
     st.caption("Tip: zet ‘✎ Bewerken’ aan voor ghost row / inline edits.")
 
-    # Plan/Notities bewerker (uitklap)
+    # Uitklap voor Plan/Notities
     with st.expander(" Plan/Notities bewerken"):
         all_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
         sel_id = st.selectbox("Kies Trade_ID", ["(geen)"] + all_ids, index=0)
@@ -452,53 +461,46 @@ with tab_journal:
                 except Exception as e:
                     st.error(f"Opslaan mislukt: {e}")
 
-    # Opslaan/Verwijderen
+    # CRUD helpers
     def _map_row_to_payload(r: pd.Series, base_row: dict) -> dict:
         out = {k: base_row.get(k, "") for k in ORDER}
-        tid = str(r.get("ID", "")).strip() or str(base_row.get(COL["TRADE_ID"], "")).strip()
-
-        out[COL["TRADE_ID"]] = tid
+        out[COL["TRADE_ID"]] = str(r.get("ID", base_row.get(COL["TRADE_ID"], ""))).strip()
+        # Datum
         out[COL["DATUM"]] = pd.to_datetime(
             r.get(COL["DATUM"]) or base_row.get(COL["DATUM"]) or pd.Timestamp.today()
         ).strftime(DATE_FMT)
-
+        # Scalar velden
         out[COL["SIDE"]] = str(r.get(COL["SIDE"], base_row.get(COL["SIDE"], ""))).strip()
         out[COL["SETUP"]] = str(r.get(COL["SETUP"], base_row.get(COL["SETUP"], ""))).strip()
-
         out[COL["RISK_PCT"]] = r.get(COL["RISK_PCT"], base_row.get(COL["RISK_PCT"], DEFAULT_RISK_PCT))
-
-        # Opslaan als rauwe invoer (string) — backend rekent met _to_num
+        # String-velden (bewust rauw voor komma/punt)
         out[COL["CAP_TRADE"]] = r.get(COL["CAP_TRADE"], base_row.get(COL["CAP_TRADE"], ""))
         out[COL["ENTRY"]] = r.get(COL["ENTRY"], base_row.get(COL["ENTRY"], ""))
         out[COL["SL"]] = r.get(COL["SL"], base_row.get(COL["SL"], ""))
         out[COL["TP1"]] = r.get(COL["TP1"], base_row.get(COL["TP1"], ""))
         out[COL["TP2"]] = r.get(COL["TP2"], base_row.get(COL["TP2"], ""))
         out[COL["TP3"]] = r.get(COL["TP3"], base_row.get(COL["TP3"], ""))
-
-        # Contract Size is afgeleid; we bewaren wat in de editor staat (geformatteerde string)
-        out[COL["CONTRACT_SIZE"]] = r.get(
-            COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], "")
-        )
-
+        # Afgeleiden
+        out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
         out[COL["RR_PLAN"]] = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
         out[COL["RR_ACTUAL"]] = r.get(COL["RR_ACTUAL"], base_row.get(COL["RR_ACTUAL"], ""))
-
+        # PnL/fees
         out[COL["FEES"]] = r.get(COL["FEES"], base_row.get(COL["FEES"], ""))
         out[COL["PNL_TP1"]] = r.get(COL["PNL_TP1"], base_row.get(COL["PNL_TP1"], ""))
         out[COL["PNL_TP2"]] = r.get(COL["PNL_TP2"], base_row.get(COL["PNL_TP2"], ""))
         out[COL["PNL_TP3"]] = r.get(COL["PNL_TP3"], base_row.get(COL["PNL_TP3"], ""))
         out[COL["PNL_EXIT"]] = r.get(COL["PNL_EXIT"], base_row.get(COL["PNL_EXIT"], ""))
-
-        # safe
+        # Free text
         out[COL["PLAN"]] = r.get(COL["PLAN"], base_row.get(COL["PLAN"], ""))
         out[COL["NOTES"]] = r.get(COL["NOTES"], base_row.get(COL["NOTES"], ""))
         out[COL["EMOTIES"]] = r.get(COL["EMOTIES"], base_row.get(COL["EMOTIES"], ""))
         out[COL["SHOTS"]] = r.get(COL["SHOTS"], base_row.get(COL["SHOTS"], ""))
-
         return out
 
-    base_map = {str(r[COL["TRADE_ID"]]): r.to_dict() for _, r in df_view.iterrows()}
+    # Build een snapshot van bestaande rijen (key = Trade_ID)
+    base_map = {str(r[COL["TRADE_ID"]]): r.to_dict() for _, r in df_view.iterrows() if str(r[COL["TRADE_ID"]]).strip()}
 
+    # Opslaan/Verwijderen
     if edit_mode:
         cA, cB, cC = st.columns(3)
         do_save = cA.button(" Opslaan wijzigingen", type="primary")
@@ -511,28 +513,64 @@ with tab_journal:
                 st.success(f"Verwijderd: {del_id.strip()}")
                 st.rerun()
             except Exception as e:
-                st.error(f"Opslaan mislukt: {e}")
+                st.error(f"Verwijderen mislukt: {e}")
 
         if do_save:
             ok_all = True
+            appended = 0
+            updated = 0
+            skipped_empty = 0
+
             for idx, row in edited.iterrows():
-                tid = str(row.get("ID", "")).strip()
-                base_row = base_map.get(tid, {k: "" for k in ORDER})
-                payload = _map_row_to_payload(row, base_row)
-                try:
-                    if tid in base_map:
-                        update_entry(tid, payload)
-                    else:
+                # Sla lege ghost-row over
+                if _row_is_effectively_empty(row):
+                    skipped_empty += 1
+                    continue
+
+                raw_tid = str(row.get("ID", "") or "").strip()
+                is_existing = raw_tid != "" and (raw_tid in base_map)
+
+                if is_existing:
+                    # UPDATE bestaande rij
+                    base_row = base_map.get(raw_tid, {k: "" for k in ORDER})
+                    payload = _map_row_to_payload(row, base_row)
+                    try:
+                        update_entry(raw_tid, payload)
+                        updated += 1
+                    except Exception as e:
+                        ok_all = False
+                        st.error(f"Opslaan mislukt (update {raw_tid}): {e}")
+                else:
+                    # ✅ APPEND-ONLY PAD — altijd nieuw ID genereren
+                    new_id = _new_trade_id()
+                    # Zorg dat ID zichtbaar is in UI bij volgende render
+                    row = row.copy()
+                    row["ID"] = new_id
+                    base_row = {k: "" for k in ORDER}
+                    base_row[COL["TRADE_ID"]] = new_id
+                    payload = _map_row_to_payload(row, base_row)
+                    payload[COL["TRADE_ID"]] = new_id  # hard-assign
+                    try:
                         append_entry(payload)
-                except Exception as e:
-                    ok_all = False
-                    st.error(f"Opslaan mislukt ({tid or f'row#{idx+1}'}): {e}")
+                        appended += 1
+                    except Exception as e:
+                        ok_all = False
+                        st.error(f"Opslaan mislukt (append {new_id}): {e}")
 
             if ok_all:
-                st.success("Wijzigingen opgeslagen ✅")
+                msg_bits = []
+                if appended:
+                    msg_bits.append(f"{appended} toegevoegd")
+                if updated:
+                    msg_bits.append(f"{updated} gewijzigd")
+                if skipped_empty:
+                    msg_bits.append(f"{skipped_empty} leeg overgeslagen")
+                st.success("Wijzigingen opgeslagen ✅ " + (" · ".join(msg_bits) if msg_bits else ""))
+
                 if APP.get("gh_sync_enabled", False):
                     ok, msg = github_sync.sync_now()
                     st.info(msg)
+
                 st.rerun()
 
     # Export
