@@ -414,7 +414,7 @@ with tab_journal:
     )
     r1[2].metric(
         "Totale PnL (BTC)",
-        _fmt_num_3dec(pnl_btc_total),   # Σ PNL_BTC (volgens 07c)
+        _fmt_num_3dec(pnl_btc_total),   # Σ PNL_BTC (volgens 07c/07d)
         delta=_fmt_delta_num(last_pnl_btc, "laatste trade"),
     )
     r1[3].metric(
@@ -475,6 +475,12 @@ with tab_journal:
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
+
+    # 🔧 BELANGRIJKE FIX: bied PNL_TP1/2/3 en PNL_Exit als STRING aan voor TextColumn
+    for c in [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]:
+        if c in df_view.columns:
+            df_view[c] = pd.Series(df_view[c]).astype("string")
+            df_view[c] = df_view[c].fillna("")
 
     # Kolomconfig — PNL_TP1/2/3 en PNL_Exit als TextColumn (accepteert ',' of '.'); we normaliseren bij opslag
     colcfg = {
@@ -542,6 +548,7 @@ with tab_journal:
                 return "background-color: #842029; color: white;"  # rood
             return ""  # 0 of leeg => neutraal
 
+        # let op: applymap is deprecated maar functioneel OK; we laten het staan (alleen warning)
         styler = (
             df_show.style
             .applymap(_cell_color, subset=[COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], PNL_BTC_COL])
