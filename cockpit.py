@@ -23,7 +23,7 @@ import github_sync
 from kpi_utils import apply_filters
 from risk_utils import contracts_from_row
 
-# Nieuwe (alleen lokaal) kolomlabel zonder schema-wijziging
+# Lokale (nieuwe) berekende kolom zonder schema-wijziging
 PNL_BTC_COL = "PNL_BTC"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -245,12 +245,12 @@ with tab_journal:
     if COL["CAP_TRADE"] not in df_raw.columns:
         df_raw[COL["CAP_TRADE"]] = ""
 
-    # Voeg de nieuwe kolom PNL_BTC toe als niet aanwezig (zonder schema-wijziging)
+    # Zorg dat PNL_BTC kolom bestaat (zonder schema-wijziging)
     if PNL_BTC_COL not in df_raw.columns:
         df_raw[PNL_BTC_COL] = 0.0
 
     # ──────────────────────────────────────────────────────────────────────
-    # Backend autos: Contract size + RR's + PNL_Exit (behoud) + PNL_BTC (nieuw)
+    # Backend autos: Contract size + RR's + PNL_Exit (behoud) + PNL_BTC + RR(Actueel)
     # ──────────────────────────────────────────────────────────────────────
     def _row_autos(row: pd.Series) -> pd.Series:
         # Contract Size
@@ -266,7 +266,7 @@ with tab_journal:
         _, contracts = contracts_from_row(cap, risk_pct_val, entry, sl)
         row[COL["CONTRACT_SIZE"]] = "" if contracts is None else _fmt_int_grouped(contracts)
 
-        # RR (Plan)
+        # RR (Plan) (ongewijzigd)
         side = (row.get(COL["SIDE"]) or "").strip().lower()
         tp1_price, tp2_price, tp3_price = (
             _to_num(row.get(COL["TP1"])),
@@ -289,18 +289,21 @@ with tab_journal:
             rr_plan = max(cands) if cands else None
         row[COL["RR_PLAN"]] = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
 
-        # PnL velden (bewerkbare kolommen bestaan al: PNL_TP1..3 en PNL_Exit)
+        # PnL invoervelden met EU-komma support (bewerkbaar): normaliseer naar float
         pnl_tp1 = _to_num(row.get(COL["PNL_TP1"])) or 0.0
         pnl_tp2 = _to_num(row.get(COL["PNL_TP2"])) or 0.0
         pnl_tp3 = _to_num(row.get(COL["PNL_TP3"])) or 0.0
+        row[COL["PNL_TP1"]] = pnl_tp1
+        row[COL["PNL_TP2"]] = pnl_tp2
+        row[COL["PNL_TP3"]] = pnl_tp3
 
-        # PNL_Exit: behoud bestaande waarde; vul alleen met 0.0 als leeg (GEEN herberekening forceren)
+        # PNL_Exit: behoud bestaand, normaliseer (leeg -> 0.0)
         pnl_exit_existing = _to_num(row.get(COL["PNL_EXIT"]))
         pnl_exit = 0.0 if pnl_exit_existing is None else pnl_exit_existing
-        row[COL["PNL_EXIT"]] = pnl_exit  # zichtbaar als numeriek
+        row[COL["PNL_EXIT"]] = pnl_exit
 
-        # ✅ NIEUW: PNL_BTC = TP1 + TP2 + TP3 + Exit
-        pnl_btc = (pnl_tp1 or 0.0) + (pnl_tp2 or 0.0) + (pnl_tp3 or 0.0) + (pnl_exit or 0.0)
+        # ✅ PNL_BTC = TP1 + TP2 + TP3 + Exit
+        pnl_btc = float(pnl_tp1 + pnl_tp2 + pnl_tp3 + pnl_exit)
         row[PNL_BTC_COL] = pnl_btc
 
         # ✅ RR (Actueel) = PNL_BTC / (Kapitaal × Risk%/100) met guard
@@ -321,7 +324,7 @@ with tab_journal:
 
     df_auto = df_raw.apply(_row_autos, axis=1)
 
-    # Dtypes voor view:
+    # Dtypes (numeriek) voor view/agg:
     NUM_COLS = [
         COL["RISK_PCT"],
         COL["FEES"],
@@ -345,14 +348,14 @@ with tab_journal:
     )
 
     # ──────────────────────────────────────────────────────────────────────
-    # KPI-balk — (labels ongewijzigd), wiring: ΣPNL_BTC en Fees correct
+    # KPI-balk (ongewijzigde set/labels) — wiring via ΣPNL_BTC en Fees
     # ──────────────────────────────────────────────────────────────────────
     if not df_filtered.empty:
         fees_series = pd.to_numeric(df_filtered[COL["FEES"]], errors="coerce").fillna(0.0)
         pnl_btc_series = pd.to_numeric(df_filtered[PNL_BTC_COL], errors="coerce").fillna(0.0)
 
         fees_total = float(fees_series.sum())
-        pnl_btc_total = float(pnl_btc_series.sum())           # Σ PNL_BTC (GEEN fees)
+        pnl_btc_total = float(pnl_btc_series.sum())           # Σ PNL_BTC (zonder fees)
         acct_now = (START_UI + pnl_btc_total - fees_total) if START_UI is not None else None
         roi_pct = None if not START_UI else ((acct_now / START_UI - 1.0) * 100.0 if START_UI != 0 else None)
 
@@ -398,7 +401,7 @@ with tab_journal:
         sign = "+" if pct > 0 else ""
         return f"{sign}{pct:.2f}%"
 
-    # KPI layout (8 tegels)
+    # KPI layout (8 tegels, ongewijzigd)
     r1 = st.columns(4)
     r2 = st.columns(4)
 
@@ -411,7 +414,7 @@ with tab_journal:
     )
     r1[2].metric(
         "Totale PnL (BTC)",
-        _fmt_num_3dec(pnl_btc_total),   # Σ PNL_BTC (volgens ticket)
+        _fmt_num_3dec(pnl_btc_total),   # Σ PNL_BTC (volgens 07c)
         delta=_fmt_delta_num(last_pnl_btc, "laatste trade"),
     )
     r1[3].metric(
@@ -432,8 +435,8 @@ with tab_journal:
     if df_filtered.empty:
         st.info("Nog geen trades in selectie.")
 
-    # Definitieve zichtbare kolommen (niets verwijderen of hernoemen)
-    # Plaatsing: … TP1 | TP2 | TP3 | PNL_Exit | PNL_BTC | Fees | Plan | …
+    # Tabelkolommen (niets verwijderen/hernoemen)
+    # Plaatsing: … TP1 | TP2 | TP3 | PNL_Exit | PNL_BTC | Fees | …
     vis_cols = [
         COL["DATUM"],
         "ID",
@@ -466,14 +469,14 @@ with tab_journal:
 
     for col in vis_cols:
         if col not in df_view.columns:
-            df_view[col] = "" if col != PNL_BTC_COL else 0.0
+            df_view[col] = "" if col not in (PNL_BTC_COL, COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]) else 0.0
 
-    # Inputs met komma/punt als TEXT laten (prijzen/kapitaal)
+    # Inputs met komma/punt als TEXT laten voor vrij invoeren (we normaliseren server-side)
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
 
-    # Kolomconfig
+    # Kolomconfig — PNL_TP1/2/3 en PNL_Exit als TextColumn (accepteert ',' of '.'); we normaliseren bij opslag
     colcfg = {
         COL["SIDE"]: st.column_config.SelectboxColumn(
             COL["SIDE"], options=["Long", "Short"], help="Richting van de trade"
@@ -496,11 +499,11 @@ with tab_journal:
         COL["RR_ACTUAL"]: st.column_config.TextColumn(
             COL["RR_ACTUAL"], help="(ΣPNL_BTC / (Cap×Risk%)) — 2 dec"
         ),
-        # PnL NumberColumns (bewerkbaar) + Exit (bewerkbaar) + BTC (read-only)
-        COL["PNL_TP1"]: st.column_config.NumberColumn(COL["PNL_TP1"], help="pnl (BTC)"),
-        COL["PNL_TP2"]: st.column_config.NumberColumn(COL["PNL_TP2"], help="pnl (BTC)"),
-        COL["PNL_TP3"]: st.column_config.NumberColumn(COL["PNL_TP3"], help="pnl (BTC)"),
-        COL["PNL_EXIT"]: st.column_config.NumberColumn(COL["PNL_EXIT"], help="pnl (BTC)"),
+        # PnL invoer als tekst (EU-komma), we parsen server-side:
+        COL["PNL_TP1"]: st.column_config.TextColumn(COL["PNL_TP1"], help="pnl (BTC) — accepteert '.' of ','"),
+        COL["PNL_TP2"]: st.column_config.TextColumn(COL["PNL_TP2"], help="pnl (BTC) — accepteert '.' of ','"),
+        COL["PNL_TP3"]: st.column_config.TextColumn(COL["PNL_TP3"], help="pnl (BTC) — accepteert '.' of ','"),
+        COL["PNL_EXIT"]: st.column_config.TextColumn(COL["PNL_EXIT"], help="pnl (BTC) — accepteert '.' of ','"),
         PNL_BTC_COL: st.column_config.NumberColumn(PNL_BTC_COL, help="TP1+TP2+TP3+Exit (BTC)", disabled=True),
         COL["FEES"]: st.column_config.NumberColumn(COL["FEES"], help="fees (BTC)"),
         COL["PLAN"]: st.column_config.TextColumn(COL["PLAN"]),
@@ -525,7 +528,7 @@ with tab_journal:
             key="journal_editor",
         )
     else:
-        # Read-only view met kleur op PNL_TP1, PNL_TP2, PNL_TP3, PNL_Exit, PNL_BTC
+        # Read-only view met kleur op PNL_TP1/2/3, PNL_Exit, PNL_BTC
         df_show = df_view[vis_cols].copy()
         for c in [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"], PNL_BTC_COL]:
             df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
@@ -553,7 +556,7 @@ with tab_journal:
         st.dataframe(styler, use_container_width=True, hide_index=True)
         edited = df_view[vis_cols].reset_index(drop=True)
 
-    # Plan/Notities bewerken
+    # Plan/Notities bewerken (ongewijzigd)
     with st.expander(" Plan/Notities bewerken"):
         all_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
         sel_id = st.selectbox("Kies Trade_ID", ["(geen)"] + all_ids, index=0)
@@ -595,15 +598,14 @@ with tab_journal:
         out[COL["TP1"]] = r.get(COL["TP1"], base_row.get(COL["TP1"], ""))
         out[COL["TP2"]] = r.get(COL["TP2"], base_row.get(COL["TP2"], ""))
         out[COL["TP3"]] = r.get(COL["TP3"], base_row.get(COL["TP3"], ""))
-        # PnL (bewerkbaar) + Exit (bewerkbaar) — sla rauw op
-        out[COL["PNL_TP1"]] = r.get(COL["PNL_TP1"], base_row.get(COL["PNL_TP1"], ""))
-        out[COL["PNL_TP2"]] = r.get(COL["PNL_TP2"], base_row.get(COL["PNL_TP2"], ""))
-        out[COL["PNL_TP3"]] = r.get(COL["PNL_TP3"], base_row.get(COL["PNL_TP3"], ""))
-        out[COL["PNL_EXIT"]] = r.get(COL["PNL_EXIT"], base_row.get(COL["PNL_EXIT"], ""))
+        # ✅ PnL invoervelden: normaliseer naar float (EU-komma -> '.'); leeg -> 0.0
+        for k in (COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]):
+            val = _to_num(r.get(k))
+            out[k] = 0.0 if val is None else float(val)
         # Afgeleiden/overig
         out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
         out[COL["RR_PLAN"]] = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
-        # RR_ACTUAL wordt afgeleid — maar sla de huidige tekst veilig op (geen schemawijziging)
+        # RR_ACTUAL is afgeleid — maar sla de huidige tekst veilig op
         out[COL["RR_ACTUAL"]] = r.get(COL["RR_ACTUAL"], base_row.get(COL["RR_ACTUAL"], ""))
         # Fees
         out[COL["FEES"]] = r.get(COL["FEES"], base_row.get(COL["FEES"], ""))
@@ -697,4 +699,3 @@ with tab_journal:
     if st.button("Exporteer zichtbare rijen (.csv)"):
         out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
-
