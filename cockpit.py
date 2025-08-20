@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import pandas as pd
 import streamlit as st
 
-# Project imports (bestaande modules in je repo)
+# Repo-modules
 from schema import COL, ORDER, DATE_FMT
 from utils_config import load_config, format_btc
 from journal_store import (
@@ -80,7 +79,7 @@ def _row_is_effectively_empty(row: pd.Series) -> bool:
     return True
 
 
-def _next_sequential_id(existing_ids: list[str]) -> str:
+def _next_sequential_id(existing_ids: List[str]) -> str:
     """Bepaal volgende oplopende integer-ID als string ('1','2','3',...)."""
     ints = []
     for x in existing_ids:
@@ -325,17 +324,25 @@ with tab_journal:
     # KPI-balk — herstelde set + badges laatste trade
     # ──────────────────────────────────────────────────────────────────────
     # cumulatief
-    fees_total = float((df_filtered[COL["FEES"]].fillna(0)).sum()) if not df_filtered.empty else 0.0
-    pnl_exit_vals = pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce") if not df_filtered.empty else pd.Series([], dtype=float)
-    pnl_cum = float(pnl_exit_vals.fillna(0).sum() - fees_total) if not df_filtered.empty else 0.0
+    if not df_filtered.empty:
+        fees_total = float((df_filtered[COL["FEES"]].fillna(0)).sum())
+        pnl_exit_vals = pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce")
+        pnl_cum = float(pnl_exit_vals.fillna(0).sum() - fees_total)
+        wins = int((pnl_exit_vals > 0).sum())
+        losses = int((pnl_exit_vals < 0).sum())
+        total_trades = wins + losses + int((pnl_exit_vals == 0).sum())
+    else:
+        fees_total = 0.0
+        pnl_cum = 0.0
+        wins = 0
+        losses = 0
+        total_trades = 0
+
     acct_now = (START_UI + pnl_cum) if START_UI is not None else None
     roi_pct = None
     if START_UI and START_UI != 0:
         roi_pct = (acct_now / START_UI - 1.0) * 100.0 if acct_now is not None else None
 
-    wins = int((pnl_exit_vals > 0).sum()) if not df_filtered.empty else 0
-    losses = int((pnl_exit_vals < 0).sum()) if not df_filtered.empty else 0
-    total_trades = wins + losses + int((pnl_exit_vals == 0).sum()) if not df_filtered.empty else 0
     winrate_pct = (wins / max(wins + losses, 1) * 100.0) if (wins + losses) > 0 else None
 
     # laatste trade
@@ -348,9 +355,9 @@ with tab_journal:
     r2 = st.columns(4)
 
     # Rij 1
+    r1[0].metric("Startkapitaal (BTC)", format_btc(START_UI))
     acct_text = "—" if acct_now is None else format_btc(acct_now)
     acct_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)} laatste trade" if last_pnl > 0 else f"{format_btc(last_pnl)} laatste trade")
-    r1[0].metric("Startkapitaal (BTC)", format_btc(START_UI))
     r1[1].metric("Actueel kapitaal (BTC)", acct_text, delta=acct_delta)
     pnl_text = format_btc(pnl_cum)
     pnl_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)} laatste trade" if last_pnl > 0 else f"{format_btc(last_pnl)} laatste trade")
@@ -401,21 +408,18 @@ with tab_journal:
     ]
 
     df_view = df_filtered.copy()
-    # Toon ID-kolom altijd vanuit Trade_ID
     df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
 
     for col in vis_cols:
         if col not in df_view.columns:
             df_view[col] = ""
 
-    # Inputs die komma/punt moeten accepteren als TEXT houden
+    # Inputs met komma/punt als TEXT laten (decimalen)
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
-            # TP's mogen als text ivm komma, editor converteert met NumberColumn ook goed,
-            # maar om strikt te blijven met eerdere ticket: laat als string voor invoer.
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
 
-    # Kolomconfig (PNL-kolommen als NumberColumn; Exit ook NumberColumn)
+    # Kolomconfig
     colcfg = {
         COL["SIDE"]: st.column_config.SelectboxColumn(
             COL["SIDE"], options=["Long", "Short"], help="Richting van de trade"
@@ -462,10 +466,8 @@ with tab_journal:
             key="journal_editor",
         )
     else:
-        # Read-only, met kleur op PNL-kolommen
+        # Read-only view met kleur op PNL_Exit en TP1–TP3
         df_show = df_view[vis_cols].copy()
-
-        # Converteer PNL-kolommen naar numeriek voor styling & format
         for c in [COL["PNL_EXIT"], COL["TP1"], COL["TP2"], COL["TP3"]]:
             df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
 
@@ -480,10 +482,7 @@ with tab_journal:
 
         styler = (
             df_show.style
-            .applymap(_cell_color, subset=[COL["PNL_EXIT"]])
-            .applymap(_cell_color, subset=[COL["TP1"]])
-            .applymap(_cell_color, subset=[COL["TP2"]])
-            .applymap(_cell_color, subset=[COL["TP3"]])
+            .applymap(_cell_color, subset=[COL["PNL_EXIT"], COL["TP1"], COL["TP2"], COL["TP3"]])
             .format({
                 COL["PNL_EXIT"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
                 COL["TP1"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
@@ -492,9 +491,9 @@ with tab_journal:
             })
         )
         st.dataframe(styler, use_container_width=True, hide_index=True)
-        edited = df_view[vis_cols].reset_index(drop=True)  # voor consistency in CRUD hieronder
+        edited = df_view[vis_cols].reset_index(drop=True)
 
-    # Uitklap voor Plan/Notities
+    # Plan/Notities bewerken
     with st.expander(" Plan/Notities bewerken"):
         all_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
         sel_id = st.selectbox("Kies Trade_ID", ["(geen)"] + all_ids, index=0)
@@ -538,11 +537,12 @@ with tab_journal:
         out[COL["TP3"]] = r.get(COL["TP3"], base_row.get(COL["TP3"], ""))
         # ✅ PNL Exit = som van TP's
         tpsum = 0.0
+        any_tp = False
         for val in [r.get(COL["TP1"]), r.get(COL["TP2"]), r.get(COL["TP3"])]:
             x = _to_num(val)
             if x is not None:
                 tpsum += x
-        any_tp = any(_to_num(v) is not None for v in [r.get(COL["TP1"]), r.get(COL["TP2"]), r.get(COL["TP3"])])
+                any_tp = True
         out[COL["PNL_EXIT"]] = "" if not any_tp else tpsum
         # Afgeleiden/overig
         out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
@@ -554,4 +554,89 @@ with tab_journal:
         out[COL["PLAN"]] = r.get(COL["PLAN"], base_row.get(COL["PLAN"], ""))
         out[COL["NOTES"]] = r.get(COL["NOTES"], base_row.get(COL["NOTES"], ""))
         out[COL["EMOTIES"]] = r.get(COL["EMOTIES"], base_row.get(COL["EMOTIES"], ""))
-        out[COL["SHOTS"]] = r.
+        out[COL["SHOTS"]] = r.get(COL["SHOTS"], base_row.get(COL["SHOTS"], ""))
+        return out
+
+    # Snapshot bestaande rijen (key = Trade_ID)
+    base_map = {str(r[COL["TRADE_ID"]]): r.to_dict()
+                for _, r in df_view.iterrows()
+                if str(r[COL["TRADE_ID"]]).strip()}
+
+    # Opslaan/Verwijderen
+    if edit_mode:
+        cA, cB, cC = st.columns(3)
+        do_save = cA.button(" Opslaan wijzigingen", type="primary")
+        del_id = cB.text_input("Verwijder Trade_ID (exact)")
+        do_del = cC.button("️ Verwijderen")
+
+        if do_del and del_id.strip():
+            try:
+                delete_entry(del_id.strip())
+                st.success(f"Verwijderd: {del_id.strip()}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Verwijderen mislukt: {e}")
+
+        if do_save:
+            ok_all = True
+            appended = 0
+            updated = 0
+            skipped_empty = 0
+
+            existing_ids = [str(x).strip() for x in base_map.keys() if str(x).strip()]
+            df_ed = edited if isinstance(edited, pd.DataFrame) else pd.DataFrame(edited)
+
+            for idx, row in df_ed.iterrows():
+                if _row_is_effectively_empty(row):
+                    skipped_empty += 1
+                    continue
+
+                raw_tid = str(row.get("ID", "") or "").strip()
+                is_existing = raw_tid != "" and (raw_tid in base_map)
+
+                if is_existing:
+                    base_row = base_map.get(raw_tid, {k: "" for k in ORDER})
+                    payload = _map_row_to_payload(row, base_row)
+                    try:
+                        update_entry(raw_tid, payload)
+                        updated += 1
+                    except Exception as e:
+                        ok_all = False
+                        st.error(f"Opslaan mislukt (update {raw_tid}): {e}")
+                else:
+                    # Append-only pad + oplopend ID
+                    new_id = _next_sequential_id(existing_ids)
+                    existing_ids.append(new_id)
+                    row = row.copy()
+                    row["ID"] = new_id
+                    base_row = {k: "" for k in ORDER}
+                    base_row[COL["TRADE_ID"]] = new_id
+                    payload = _map_row_to_payload(row, base_row)
+                    payload[COL["TRADE_ID"]] = new_id
+                    try:
+                        append_entry(payload)
+                        appended += 1
+                    except Exception as e:
+                        ok_all = False
+                        st.error(f"Opslaan mislukt (append {new_id}): {e}")
+
+            if ok_all:
+                msg_bits = []
+                if appended:
+                    msg_bits.append(f"{appended} toegevoegd")
+                if updated:
+                    msg_bits.append(f"{updated} gewijzigd")
+                if skipped_empty:
+                    msg_bits.append(f"{skipped_empty} leeg overgeslagen")
+                st.success("Wijzigingen opgeslagen ✅ " + (" · ".join(msg_bits) if msg_bits else ""))
+
+                if APP.get("gh_sync_enabled", False):
+                    ok, msg = github_sync.sync_now()
+                    st.info(msg)
+
+                st.rerun()
+
+    # Export
+    if st.button("Exporteer zichtbare rijen (.csv)"):
+        out = export_visible(df_filtered)
+        st.success(f"Export voltooid: `{out}`")
