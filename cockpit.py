@@ -21,7 +21,7 @@ from import_export import export_visible
 from app_state import load_state, save_state
 from backup_utils import make_backup_zip
 import github_sync
-from kpi_utils import apply_filters  # compute_kpis niet strikt nodig hier
+from kpi_utils import apply_filters
 from risk_utils import contracts_from_row
 
 
@@ -91,60 +91,24 @@ def _next_sequential_id(existing_ids: list[str]) -> str:
     return str(nxt)
 
 
-def _pnl_exit_from_tps(row: pd.Series) -> Optional[float]:
-    """Stel PNL_Exit automatisch gelijk aan laatste geldige TP-waarde met prioriteit TP3 > TP2 > TP1."""
-    for key in (COL["PNL_TP3"], COL["PNL_TP2"], COL["PNL_TP1"]):
-        v = _to_num(row.get(key))
-        if v is not None:
-            return v
-    return _to_num(row.get(COL["PNL_EXIT"]))  # behoud bestaande als TP's leeg zijn
-
-
-def _exit_color_symbol(pnl_exit: Optional[float]) -> str:
-    if pnl_exit is None:
-        return "—"
-    if pnl_exit > 0:
-        return "🟩"
-    if pnl_exit < 0:
-        return "🟥"
-    return "—"
-
-
-def _last_trade_view(df: pd.DataFrame) -> Tuple[Optional[float], Optional[str]]:
+def _last_trade_info(df: pd.DataFrame) -> Tuple[Optional[float], Optional[str], Optional[int], Optional[int]]:
     """
-    Haal info van de laatste rij in de (gefilterde) journal:
-    - return (pnl_exit_last, result_text) waarbij result_text 'Win'/'Loss'/'Break-even' is.
-    - Als niet beschikbaar -> (None, None)
+    Retourneert (last_pnl_exit, result_text, last_win_add, last_loss_add)
+    - result_text: 'Win'/'Loss'/'Break-even'/None
+    - last_win_add: 1 als Win anders 0 of None
+    - last_loss_add: 1 als Loss anders 0 of None
     """
     if df is None or df.empty:
-        return None, None
+        return None, None, None, None
     row = df.iloc[-1]
     pnl = _to_num(row.get(COL["PNL_EXIT"]))
     if pnl is None:
-        return None, None
+        return None, None, None, None
     if pnl > 0:
-        return pnl, "Win"
+        return pnl, "Win", 1, 0
     if pnl < 0:
-        return pnl, "Loss"
-    return 0.0, "Break-even"
-
-
-def _sum_pnl_net(df: pd.DataFrame) -> float:
-    """Σ (PNL_Exit of TP-som) − Fees over df."""
-    if df is None or df.empty:
-        return 0.0
-    pnl_vals = []
-    for _, r in df.iterrows():
-        pnl_exit = _to_num(r.get(COL["PNL_EXIT"]))
-        if pnl_exit is None:
-            tpsum = sum([x for x in (_to_num(r.get(COL["PNL_TP1"])),
-                                     _to_num(r.get(COL["PNL_TP2"])),
-                                     _to_num(r.get(COL["PNL_TP3"]))) if x is not None])
-        else:
-            tpsum = pnl_exit
-        fees = _to_num(r.get(COL["FEES"])) or 0.0
-        pnl_vals.append((tpsum or 0.0) - fees)
-    return float(sum(pnl_vals))
+        return pnl, "Loss", 0, 1
+    return 0.0, "Break-even", 0, 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -279,7 +243,7 @@ with tab_journal:
         df_raw[COL["CAP_TRADE"]] = ""
 
     # ──────────────────────────────────────────────────────────────────────
-    # Backend autos: Contract size + RR's + PNL_Exit kleur (alleen rij-velden)
+    # Backend autos: Contract size + RR's + PNL_Exit (som TP's)
     # ──────────────────────────────────────────────────────────────────────
     def _row_autos(row: pd.Series) -> pd.Series:
         # Contract Size
@@ -318,19 +282,14 @@ with tab_journal:
             rr_plan = max(cands) if cands else None
         row[COL["RR_PLAN"]] = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
 
-        # PNL Exit automatisch koppelen aan TP's (TP3 > TP2 > TP1)
-        pnl_exit_auto = _pnl_exit_from_tps(row)
-        row[COL["PNL_EXIT"]] = "" if pnl_exit_auto is None else pnl_exit_auto
+        # ✅ PNL Exit = som van TP's
+        tpsum = sum([x for x in (tp1, tp2, tp3) if x is not None])
+        row[COL["PNL_EXIT"]] = "" if (tp1 is None and tp2 is None and tp3 is None) else tpsum
 
-        # Kleurindicatie
-        row["Exit kleur"] = _exit_color_symbol(_to_num(row.get(COL["PNL_EXIT"])))
-
-        # RR (Actueel) — NETTO met rij-risk (Kapitaal×Risk%) obv TP's (al dan niet via Exit)
+        # RR (Actueel) — NETTO met rij-risk (Kapitaal×Risk%) obv TP-som (via Exit)
         risk_btc, _ = contracts_from_row(cap, risk_pct_val, entry, sl)
-        pnl_for_rr = _to_num(row.get(COL["PNL_EXIT"]))
-        if pnl_for_rr is None:
-            pnl_for_rr = sum([x for x in (tp1, tp2, tp3) if x is not None]) or None
         fees = _to_num(row.get(COL["FEES"])) or 0.0
+        pnl_for_rr = _to_num(row.get(COL["PNL_EXIT"]))
         rr_actual = None
         if risk_btc not in (None, 0) and pnl_for_rr is not None:
             rr_actual = (pnl_for_rr - fees) / risk_btc
@@ -363,49 +322,54 @@ with tab_journal:
     )
 
     # ──────────────────────────────────────────────────────────────────────
-    # KPI-balk — cumulatief + laatste trade
+    # KPI-balk — herstelde set + badges laatste trade
     # ──────────────────────────────────────────────────────────────────────
-    pnl_cum = _sum_pnl_net(df_filtered)
+    # cumulatief
+    fees_total = float((df_filtered[COL["FEES"]].fillna(0)).sum()) if not df_filtered.empty else 0.0
+    pnl_exit_vals = pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce") if not df_filtered.empty else pd.Series([], dtype=float)
+    pnl_cum = float(pnl_exit_vals.fillna(0).sum() - fees_total) if not df_filtered.empty else 0.0
     acct_now = (START_UI + pnl_cum) if START_UI is not None else None
     roi_pct = None
     if START_UI and START_UI != 0:
         roi_pct = (acct_now / START_UI - 1.0) * 100.0 if acct_now is not None else None
 
-    last_pnl, last_result = _last_trade_view(df_filtered)
+    wins = int((pnl_exit_vals > 0).sum()) if not df_filtered.empty else 0
+    losses = int((pnl_exit_vals < 0).sum()) if not df_filtered.empty else 0
+    total_trades = wins + losses + int((pnl_exit_vals == 0).sum()) if not df_filtered.empty else 0
+    winrate_pct = (wins / max(wins + losses, 1) * 100.0) if (wins + losses) > 0 else None
+
+    # laatste trade
+    last_pnl, last_result, last_win_add, last_loss_add = _last_trade_info(df_filtered)
     last_roi_pp = None
     if START_UI and START_UI != 0 and last_pnl is not None:
         last_roi_pp = (last_pnl / START_UI) * 100.0
 
-    # Winrate cumulatief
-    wins = int(((df_filtered[COL["PNL_EXIT"]].astype(float) > 0).fillna(False)).sum())
-    losses = int(((df_filtered[COL["PNL_EXIT"]].astype(float) < 0).fillna(False)).sum())
-    total_trades = wins + losses + int(((df_filtered[COL["PNL_EXIT"]].astype(float) == 0).fillna(False)).sum())
-    winrate_pct = (wins / total_trades * 100.0) if total_trades > 0 else None
-
-    def _fmt_delta(v, fmt_fn):
-        return None if v is None else fmt_fn(v)
-
     r1 = st.columns(4)
-    # Accountwaarde
+    r2 = st.columns(4)
+
+    # Rij 1
     acct_text = "—" if acct_now is None else format_btc(acct_now)
-    acct_delta = None if last_pnl is None else f"+{format_btc(last_pnl)}" if last_pnl > 0 else format_btc(last_pnl)
-    r1[0].metric("Accountwaarde (BTC)", acct_text, delta=acct_delta)
-
-    # ROI
-    roi_text = "—" if roi_pct is None else f"{roi_pct:.2f}%"
-    roi_delta = None if last_roi_pp is None else (f"+{last_roi_pp:.2f}%"
-                                                  if last_roi_pp > 0 else f"{last_roi_pp:.2f}%")
-    r1[1].metric("ROI %", roi_text, delta=roi_delta)
-
-    # PnL cumulatief
+    acct_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)} laatste trade" if last_pnl > 0 else f"{format_btc(last_pnl)} laatste trade")
+    r1[0].metric("Startkapitaal (BTC)", format_btc(START_UI))
+    r1[1].metric("Actueel kapitaal (BTC)", acct_text, delta=acct_delta)
     pnl_text = format_btc(pnl_cum)
-    pnl_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)}" if last_pnl > 0 else format_btc(last_pnl))
+    pnl_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)} laatste trade" if last_pnl > 0 else f"{format_btc(last_pnl)} laatste trade")
     r1[2].metric("Totale PnL (BTC)", pnl_text, delta=pnl_delta)
+    r1[3].metric("Totale Fees (BTC)", format_btc(fees_total))
 
-    # Winrate
+    # Rij 2
+    roi_text = "—" if roi_pct is None else f"{roi_pct:.2f}%"
+    roi_delta = None if last_roi_pp is None else (f"+{last_roi_pp:.2f}% laatste trade" if last_roi_pp > 0 else f"{last_roi_pp:.2f}% laatste trade")
+    r2[0].metric("ROI %", roi_text, delta=roi_delta)
+
+    wins_delta = None if last_win_add is None else f"+{last_win_add}"
+    losses_delta = None if last_loss_add is None else f"+{last_loss_add}"
+    r2[1].metric("Winnende trades", f"{wins}", delta=wins_delta)
+    r2[2].metric("Verloren trades", f"{losses}", delta=losses_delta)
+
     winrate_text = "—" if winrate_pct is None else f"{winrate_pct:.2f}%"
-    last_result_text = None if last_result is None else f"Laatst: {last_result}"
-    r1[3].metric("Winrate %", winrate_text, delta=last_result_text)
+    last_result_text = "—" if last_result is None else f"Laatst: {last_result}"
+    r2[3].metric("Winrate %", winrate_text, delta=last_result_text)
 
     st.divider()
 
@@ -429,11 +393,7 @@ with tab_journal:
         COL["TP2"],
         COL["TP3"],
         COL["PNL_EXIT"],
-        "Exit kleur",
         COL["FEES"],
-        COL["PNL_TP1"],
-        COL["PNL_TP2"],
-        COL["PNL_TP3"],
         COL["PLAN"],
         COL["NOTES"],
         COL["EMOTIES"],
@@ -451,9 +411,11 @@ with tab_journal:
     # Inputs die komma/punt moeten accepteren als TEXT houden
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
+            # TP's mogen als text ivm komma, editor converteert met NumberColumn ook goed,
+            # maar om strikt te blijven met eerdere ticket: laat als string voor invoer.
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
 
-    # Kolomconfig
+    # Kolomconfig (PNL-kolommen als NumberColumn; Exit ook NumberColumn)
     colcfg = {
         COL["SIDE"]: st.column_config.SelectboxColumn(
             COL["SIDE"], options=["Long", "Short"], help="Richting van de trade"
@@ -476,14 +438,10 @@ with tab_journal:
         COL["RR_ACTUAL"]: st.column_config.TextColumn(
             COL["RR_ACTUAL"], help="(ΣTP-PNL − Fees) / (Kapitaal×Risk%) — Exit telt niet mee"
         ),
-        COL["PNL_EXIT"]: st.column_config.NumberColumn(COL["PNL_EXIT"], help="auto vanuit TP’s; overschrijfbaar"),
-        "Exit kleur": st.column_config.TextColumn("Exit kleur", help="🟩 positief · 🟥 negatief · — geen"),
+        COL["PNL_EXIT"]: st.column_config.NumberColumn(COL["PNL_EXIT"], help="som van TP1–TP3; auto"),
+        COL["FEES"]: st.column_config.NumberColumn(COL["FEES"], help="fees (BTC)"),
         COL["PLAN"]: st.column_config.TextColumn(COL["PLAN"]),
         COL["NOTES"]: st.column_config.TextColumn(COL["NOTES"]),
-        COL["FEES"]: st.column_config.NumberColumn(COL["FEES"], help="fees (BTC)"),
-        COL["PNL_TP1"]: st.column_config.NumberColumn(COL["PNL_TP1"], help="pnl (BTC)"),
-        COL["PNL_TP2"]: st.column_config.NumberColumn(COL["PNL_TP2"], help="pnl (BTC)"),
-        COL["PNL_TP3"]: st.column_config.NumberColumn(COL["PNL_TP3"], help="pnl (BTC)"),
     }
 
     edit_mode = st.toggle(
@@ -492,16 +450,49 @@ with tab_journal:
         help="Zet aan om rijen inline te wijzigen of toe te voegen (ghost row).",
     )
 
-    edited = st.data_editor(
-        df_view[vis_cols].reset_index(drop=True),
-        use_container_width=True,
-        hide_index=True,
-        column_config=colcfg,
-        disabled=not edit_mode,
-        num_rows=("dynamic" if edit_mode else "fixed"),  # ghost row
-        key="journal_editor",
-    )
-    st.caption("Tip: zet ‘✎ Bewerken’ aan voor ghost row / inline edits.")
+    if edit_mode:
+        # Editable view
+        edited = st.data_editor(
+            df_view[vis_cols].reset_index(drop=True),
+            use_container_width=True,
+            hide_index=True,
+            column_config=colcfg,
+            disabled=False,
+            num_rows="dynamic",  # ghost row
+            key="journal_editor",
+        )
+    else:
+        # Read-only, met kleur op PNL-kolommen
+        df_show = df_view[vis_cols].copy()
+
+        # Converteer PNL-kolommen naar numeriek voor styling & format
+        for c in [COL["PNL_EXIT"], COL["TP1"], COL["TP2"], COL["TP3"]]:
+            df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
+
+        def _cell_color(v):
+            if pd.isna(v):
+                return ""
+            if v > 0:
+                return "background-color: #0f5132; color: white;"  # groen
+            if v < 0:
+                return "background-color: #842029; color: white;"  # rood
+            return ""
+
+        styler = (
+            df_show.style
+            .applymap(_cell_color, subset=[COL["PNL_EXIT"]])
+            .applymap(_cell_color, subset=[COL["TP1"]])
+            .applymap(_cell_color, subset=[COL["TP2"]])
+            .applymap(_cell_color, subset=[COL["TP3"]])
+            .format({
+                COL["PNL_EXIT"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
+                COL["TP1"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
+                COL["TP2"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
+                COL["TP3"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
+            })
+        )
+        st.dataframe(styler, use_container_width=True, hide_index=True)
+        edited = df_view[vis_cols].reset_index(drop=True)  # voor consistency in CRUD hieronder
 
     # Uitklap voor Plan/Notities
     with st.expander(" Plan/Notities bewerken"):
@@ -545,107 +536,22 @@ with tab_journal:
         out[COL["TP1"]] = r.get(COL["TP1"], base_row.get(COL["TP1"], ""))
         out[COL["TP2"]] = r.get(COL["TP2"], base_row.get(COL["TP2"], ""))
         out[COL["TP3"]] = r.get(COL["TP3"], base_row.get(COL["TP3"], ""))
-        # PNL Exit: afgeleid van TP's, maar eindwaarde mag zichtbaar blijven
-        pnl_exit_auto = _pnl_exit_from_tps(r)
-        out[COL["PNL_EXIT"]] = "" if pnl_exit_auto is None else pnl_exit_auto
+        # ✅ PNL Exit = som van TP's
+        tpsum = 0.0
+        for val in [r.get(COL["TP1"]), r.get(COL["TP2"]), r.get(COL["TP3"])]:
+            x = _to_num(val)
+            if x is not None:
+                tpsum += x
+        any_tp = any(_to_num(v) is not None for v in [r.get(COL["TP1"]), r.get(COL["TP2"]), r.get(COL["TP3"])])
+        out[COL["PNL_EXIT"]] = "" if not any_tp else tpsum
         # Afgeleiden/overig
         out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
         out[COL["RR_PLAN"]] = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
         out[COL["RR_ACTUAL"]] = r.get(COL["RR_ACTUAL"], base_row.get(COL["RR_ACTUAL"], ""))
-        # PnL/fees
+        # Fees
         out[COL["FEES"]] = r.get(COL["FEES"], base_row.get(COL["FEES"], ""))
-        out[COL["PNL_TP1"]] = r.get(COL["PNL_TP1"], base_row.get(COL["PNL_TP1"], ""))
-        out[COL["PNL_TP2"]] = r.get(COL["PNL_TP2"], base_row.get(COL["PNL_TP2"], ""))
-        out[COL["PNL_TP3"]] = r.get(COL["PNL_TP3"], base_row.get(COL["PNL_TP3"], ""))
         # Free text
         out[COL["PLAN"]] = r.get(COL["PLAN"], base_row.get(COL["PLAN"], ""))
         out[COL["NOTES"]] = r.get(COL["NOTES"], base_row.get(COL["NOTES"], ""))
         out[COL["EMOTIES"]] = r.get(COL["EMOTIES"], base_row.get(COL["EMOTIES"], ""))
-        out[COL["SHOTS"]] = r.get(COL["SHOTS"], base_row.get(COL["SHOTS"], ""))
-        return out
-
-    # Snapshot van bestaande rijen (key = Trade_ID)
-    base_map = {str(r[COL["TRADE_ID"]]): r.to_dict()
-                for _, r in df_view.iterrows()
-                if str(r[COL["TRADE_ID"]]).strip()}
-
-    # Opslaan/Verwijderen
-    if edit_mode:
-        cA, cB, cC = st.columns(3)
-        do_save = cA.button(" Opslaan wijzigingen", type="primary")
-        del_id = cB.text_input("Verwijder Trade_ID (exact)")
-        do_del = cC.button("️ Verwijderen")
-
-        if do_del and del_id.strip():
-            try:
-                delete_entry(del_id.strip())
-                st.success(f"Verwijderd: {del_id.strip()}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Verwijderen mislukt: {e}")
-
-        if do_save:
-            ok_all = True
-            appended = 0
-            updated = 0
-            skipped_empty = 0
-
-            # verzamel bestaande numerieke ID's voor sequentieel bepalen
-            existing_ids = [str(x).strip() for x in base_map.keys() if str(x).strip()]
-
-            for idx, row in edited.iterrows():
-                # Sla lege ghost-row over
-                if _row_is_effectively_empty(row):
-                    skipped_empty += 1
-                    continue
-
-                raw_tid = str(row.get("ID", "") or "").strip()
-                is_existing = raw_tid != "" and (raw_tid in base_map)
-
-                if is_existing:
-                    # UPDATE bestaande rij
-                    base_row = base_map.get(raw_tid, {k: "" for k in ORDER})
-                    payload = _map_row_to_payload(row, base_row)
-                    try:
-                        update_entry(raw_tid, payload)
-                        updated += 1
-                    except Exception as e:
-                        ok_all = False
-                        st.error(f"Opslaan mislukt (update {raw_tid}): {e}")
-                else:
-                    # ✅ APPEND-ONLY — nieuwe sequentiële ID
-                    new_id = _next_sequential_id(existing_ids)
-                    existing_ids.append(new_id)  # reserveer
-                    row = row.copy()
-                    row["ID"] = new_id
-                    base_row = {k: "" for k in ORDER}
-                    base_row[COL["TRADE_ID"]] = new_id
-                    payload = _map_row_to_payload(row, base_row)
-                    payload[COL["TRADE_ID"]] = new_id  # hard-assign
-                    try:
-                        append_entry(payload)
-                        appended += 1
-                    except Exception as e:
-                        ok_all = False
-                        st.error(f"Opslaan mislukt (append {new_id}): {e}")
-
-            if ok_all:
-                msg_bits = []
-                if appended:
-                    msg_bits.append(f"{appended} toegevoegd")
-                if updated:
-                    msg_bits.append(f"{updated} gewijzigd")
-                if skipped_empty:
-                    msg_bits.append(f"{skipped_empty} leeg overgeslagen")
-                st.success("Wijzigingen opgeslagen ✅ " + (" · ".join(msg_bits) if msg_bits else ""))
-
-                if APP.get("gh_sync_enabled", False):
-                    ok, msg = github_sync.sync_now()
-                    st.info(msg)
-
-                st.rerun()
-
-    # Export
-    if st.button("Exporteer zichtbare rijen (.csv)"):
-        out = export_visible(df_filtered)
-        st.success(f"Export voltooid: `{out}`")
+        out[COL["SHOTS"]] = r.
