@@ -8,7 +8,7 @@ from utils_config import load_config, format_btc
 from journal_store import load_journal, append_entry, update_entry, delete_entry, get_last_save_ts
 from import_export import export_visible
 from app_state import load_state, save_state
-from backup_utils import make_backup_zip, list_local_backups, restore_from_backup
+from backup_utils import make_backup_zip
 import github_sync
 
 from kpi_utils import with_pnl_total, apply_filters, compute_kpis
@@ -115,6 +115,15 @@ with tab_journal:
         if col not in df_raw.columns:
             df_raw[col] = ""
 
+    # ---- DTYPE FIX: forceer tekstkolommen naar string (anders klaagt data_editor bij TextColumn)
+    TEXT_COLS = [
+        COL["PLAN"], COL["NOTES"], COL["EMOTIES"], COL["SHOTS"],
+        COL["SETUP"], COL["SIDE"]
+    ]
+    for c in TEXT_COLS:
+        if c in df_raw.columns:
+            df_raw[c] = pd.Series(df_raw[c], dtype="string").fillna("")
+
     # Default Risk % en Kapitaal (trade) initialiseren indien leeg
     if COL["RISK_PCT"] in df_raw.columns:
         df_raw[COL["RISK_PCT"]] = df_raw[COL["RISK_PCT"]].apply(lambda v: (DEFAULT_RISK_PCT if str(v).strip()=="" else v))
@@ -220,8 +229,8 @@ with tab_journal:
         COL["TP3"]:   st.column_config.NumberColumn(COL["TP3"], help="prijs"),
         COL["RR_PLAN"]:   st.column_config.TextColumn(COL["RR_PLAN"], help="Max van TP’s; n.v.t. als SL=Entry of geen TP"),
         COL["RR_ACTUAL"]: st.column_config.TextColumn(COL["RR_ACTUAL"], help="(ΣTP-PNL − Fees) / (Kapitaal×Risk%) — Exit telt niet mee"),
-        COL["PLAN"]:  st.column_config.TextColumn(COL["PLAN"], help="Voorbeeld in cel; volledige bewerking via bewerker hieronder"),
-        COL["NOTES"]: st.column_config.TextColumn(COL["NOTES"], help="Voorbeeld in cel; volledige bewerking via bewerker hieronder"),
+        COL["PLAN"]:  st.column_config.TextColumn(COL["PLAN"], help="Volledige tekst is te bewerken in de bewerker hieronder"),
+        COL["NOTES"]: st.column_config.TextColumn(COL["NOTES"], help="Volledige tekst is te bewerken in de bewerker hieronder"),
     }
 
     edit_mode = st.toggle("✎ Bewerken/Toevoegen inschakelen", value=False,
@@ -328,4 +337,3 @@ with tab_journal:
     if st.button("Exporteer zichtbare rijen (.csv)"):
         out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
-
