@@ -1,4 +1,4 @@
-# kpi_utils.py — R0.2-04o
+# kpi_utils.py — R0.2-04p (KPI netto; geen Tags)
 from __future__ import annotations
 import pandas as pd
 import numpy as np
@@ -23,7 +23,7 @@ def ensure_dt(df: pd.DataFrame) -> pd.DataFrame:
         df2["_dt"] = pd.to_datetime(df2[COL["DATUM"]], errors="coerce")
     return df2
 
-# ΣTP of fallback Exit (zonder Fees); Fees worden later netto afgetrokken
+# ΣTP of fallback Exit (bruto; Fees later eraf)
 def row_tp_sum_present(row: dict) -> tuple[bool, float]:
     tps = [_maybe_num(row.get(COL["PNL_TP1"])),
            _maybe_num(row.get(COL["PNL_TP2"])),
@@ -101,7 +101,7 @@ def compute_kpis(df: pd.DataFrame, start_btc: float) -> dict:
     return {
         "start": float(start_btc),
         "actueel": float(actueel),
-        "pnl": float(pnl_net),                    # NETTO volgens ticket
+        "pnl": float(pnl_net),                    # ✅ NETTO
         "fees": float(fees_total),
         "roi_pct": None if roi_pct is None else float(roi_pct),
         "wins": wins,
