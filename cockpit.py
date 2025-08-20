@@ -12,22 +12,20 @@ from backup_utils import make_backup_zip, list_local_backups, restore_from_backu
 import github_sync
 
 from kpi_utils import with_pnl_total, apply_filters, compute_kpis
-from risk_utils import contracts_from_risk_pct
+from risk_utils import contracts_from_row
 
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
 
 # ---------- Config & app-state ----------
 CFG = load_config()
 APP = load_state()
+
 START_UI = float(APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0)))
-
-# risk-config (alleen backend)
-RISK_ROUND = (CFG.get("risk", {}).get("rounding") 
+RISK_ROUND = (CFG.get("risk", {}).get("rounding")
               if isinstance(CFG.get("risk"), dict) else CFG.get("RISK_ROUNDING", "floor"))
-DEFAULT_RISK_PCT = (CFG.get("risk", {}).get("percent") 
-                    if isinstance(CFG.get("risk"), dict) else CFG.get("RISK_PERCENT", 1.0))  # bv 1.0
+DEFAULT_RISK_PCT = (CFG.get("risk", {}).get("percent")
+                    if isinstance(CFG.get("risk"), dict) else CFG.get("RISK_PERCENT", 1.0))
 
-# filters in state (zonder Tags)
 APP.setdefault("filters", {"periode":"Alle","search":"","emoties":[]})
 save_state(APP)
 
@@ -41,12 +39,6 @@ def _to_num(s):
 def _short(txt: str, n=60):
     txt = str(txt or "")
     return txt if len(txt) <= n else txt[:n] + "…"
-
-def _global_actueel():
-    df_all = with_pnl_total(load_journal())
-    pnl_total  = pd.to_numeric(df_all.get(COL["PNL_TOTAL"], 0), errors="coerce").fillna(0).sum()
-    fees_total = pd.to_numeric(df_all.get(COL["FEES"], 0),      errors="coerce").fillna(0).sum()
-    return float(START_UI) + float(pnl_total) - float(fees_total)
 
 # ---------- Tabs ----------
 tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
@@ -88,9 +80,8 @@ with tab_settings:
         APP["last_snapshot_ts"] = ts; save_state(APP)
         st.success(f"Snapshot opgeslagen: {fname}")
     st.caption("Laatste snapshot: " + (APP.get("last_snapshot_ts","—")))
-    last_sync_ts = APP.get("last_sync_ts","")
-    last_sync_msg = APP.get("last_sync_msg","Sync uit")
-    st.caption(f"Laatste sync: {last_sync_ts or '—'} ({last_sync_msg})")
+    st.caption(f"Laatste save: {get_last_save_ts() or '—'}")
+    st.caption(f"Laatste sync: {APP.get('last_sync_ts','—') or '—'} ({APP.get('last_sync_msg','Sync uit')})")
 
 # ========================================
 # JOURNAL
@@ -111,8 +102,7 @@ with tab_journal:
             if cB.button("Toepassen"):
                 APP["filters"] = filt; save_state(APP); st.rerun()
     with h3:
-        last_save = get_last_save_ts()
-        st.caption(f"💾 Laatste save: {last_save or '—'}")
+        st.caption(f"💾 Laatste save: {get_last_save_ts() or '—'}")
         st.caption(f"☁️ Laatste sync: {APP.get('last_sync_ts','—') or '—'} ({APP.get('last_sync_msg','Sync uit')})")
 
     st.divider()
@@ -125,35 +115,43 @@ with tab_journal:
         if col not in df_raw.columns:
             df_raw[col] = ""
 
-    # Init default Risk % per rij als leeg
+    # Default Risk % en Kapitaal (trade) initialiseren indien leeg
     if COL["RISK_PCT"] in df_raw.columns:
         df_raw[COL["RISK_PCT"]] = df_raw[COL["RISK_PCT"]].apply(lambda v: (DEFAULT_RISK_PCT if str(v).strip()=="" else v))
     else:
         df_raw[COL["RISK_PCT"]] = DEFAULT_RISK_PCT
+    if COL["CAP_TRADE"] not in df_raw.columns:
+        df_raw[COL["CAP_TRADE"]] = ""
 
-    # Backend autos: Risk BTC + Contract Size + RR's
+    # Backend autos: Contract size + RR's (alleen rij-velden)
     def _row_autos(row: pd.Series) -> pd.Series:
         entry = _to_num(row.get(COL["ENTRY"]))
         sl    = _to_num(row.get(COL["SL"]))
+        cap   = _to_num(row.get(COL["CAP_TRADE"]))
         risk_pct_val = _to_num(row.get(COL["RISK_PCT"])) if row.get(COL["RISK_PCT"]) is not None else DEFAULT_RISK_PCT
-        acct  = _global_actueel()  # actueel kapitaal over hele dataset
-        risk_btc, contracts = contracts_from_risk_pct(acct, risk_pct_val, entry, sl, RISK_ROUND)
+
+        risk_btc, contracts = contracts_from_row(cap, risk_pct_val, entry, sl, RISK_ROUND)
+        row[COL["CONTRACT_SIZE"]] = "" if contracts is None else int(contracts)
 
         # RR (Plan)
         side = (row.get(COL["SIDE"]) or "").strip().lower()
         tp1, tp2, tp3 = _to_num(row.get(COL["TP1"])), _to_num(row.get(COL["TP2"])), _to_num(row.get(COL["TP3"]))
         rr_plan = None
-        if entry is not None and sl is not None and entry != sl:
+        den = None
+        if entry is not None and sl is not None:
+            den = abs(entry - sl)
+        if den is not None and den != 0:
             cands = []
             for tp in [tp1, tp2, tp3]:
                 if tp is None: continue
                 if side == "short":
-                    cands.append((entry - tp) / abs(entry - sl))
+                    cands.append((entry - tp) / den)
                 else:
-                    cands.append((tp - entry) / abs(entry - sl))
+                    cands.append((tp - entry) / den)
             rr_plan = max(cands) if cands else None
+        row[COL["RR_PLAN"]] = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
 
-        # RR (Actueel) — PNL_Exit telt NIET mee
+        # RR (Actueel) — netto per rij met rij-risk
         pnl_tp = sum([x for x in [_to_num(row.get(COL["PNL_TP1"])),
                                   _to_num(row.get(COL["PNL_TP2"])),
                                   _to_num(row.get(COL["PNL_TP3"]))] if x is not None])
@@ -161,22 +159,19 @@ with tab_journal:
         rr_actual = None
         if risk_btc not in (None, 0) and pnl_tp is not None:
             rr_actual = (pnl_tp - fees) / risk_btc
+        row[COL["RR_ACTUAL"]] = "n.v.t." if rr_actual is None else f"{rr_actual:.2f}"
 
-        row[COL["RISK_BTC"]]      = "n.v.t." if risk_btc is None else f"{risk_btc:.6f}"
-        row[COL["CONTRACT_SIZE"]] = "" if contracts is None else int(contracts)
-        row[COL["RR_PLAN"]]       = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
-        row[COL["RR_ACTUAL"]]     = "n.v.t." if rr_actual is None else f"{rr_actual:.2f}"
         return row
 
     df_auto = df_raw.apply(_row_autos, axis=1)
 
-    # Filters toepassen (zonder Tags)
+    # Filters toepassen (geen Tags)
     filt = APP.get("filters", {"periode":"Alle","search":"","emoties":[]})
     df_filtered = apply_filters(df_auto, search=filt.get("search",""),
                                 emoties=filt.get("emoties", []),
                                 periode=filt.get("periode","Alle"))
 
-    # KPI-balk
+    # KPI-balk (NETTO: Σ[coalesce(ΣTP, Exit, 0) − Fees])
     k = compute_kpis(df_filtered, start_btc=START_UI)
     def _pct(x): return "—" if x is None else f"{x:.2f}%"
     r1 = st.columns(4)
@@ -198,35 +193,35 @@ with tab_journal:
     if df_filtered.empty:
         st.info("Nog geen trades in selectie.")
 
-    # Zichtbare kolommen (Tags weg, Plan/Notities preview terug)
+    # Definitieve zichtbare kolommen
     vis_cols = [
         COL["DATUM"], "ID", COL["SIDE"], COL["SETUP"],
-        COL["RISK_PCT"], COL["RISK_BTC"], COL["CONTRACT_SIZE"], COL["RR_PLAN"], COL["RR_ACTUAL"],
+        COL["RISK_PCT"], COL["CAP_TRADE"], COL["CONTRACT_SIZE"],
+        COL["RR_PLAN"], COL["RR_ACTUAL"],
         COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
         COL["FEES"], COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"],
-        COL["EMOTIES"], "Plan_preview", "Notities_preview", COL["SHOTS"],
+        COL["PLAN"], COL["NOTES"], COL["EMOTIES"], COL["SHOTS"],
     ]
     df_view = df_filtered.copy()
     df_view["ID"] = df_view[COL["TRADE_ID"]].astype(str)
-    df_view["Plan_preview"]     = df_view[COL["PLAN"]].apply(lambda x: _short(x, 60))
-    df_view["Notities_preview"] = df_view[COL["NOTES"]].apply(lambda x: _short(x, 60))
     for col in vis_cols:
         if col not in df_view.columns: df_view[col] = ""
 
-    # kolomconfig
+    # kolomconfig & tooltips
     colcfg = {
         COL["SIDE"]:  st.column_config.SelectboxColumn(COL["SIDE"], options=["Long","Short"], help="Richting van de trade"),
-        COL["RISK_PCT"]: st.column_config.NumberColumn(COL["RISK_PCT"], help="percentage (per trade)", step=0.01),
-        COL["RISK_BTC"]: st.column_config.TextColumn(COL["RISK_BTC"], help="BTC (automatisch)"),
-        COL["CONTRACT_SIZE"]: st.column_config.NumberColumn(COL["CONTRACT_SIZE"], help="contracts (auto)", step=1, disabled=True),
-        COL["FEES"]:  st.column_config.NumberColumn(COL["FEES"], help="BTC"),
+        COL["RISK_PCT"]: st.column_config.NumberColumn(COL["RISK_PCT"], help="percentage van Kapitaal (trade)", min_value=0.1, max_value=5.0, step=0.1),
+        COL["CAP_TRADE"]: st.column_config.NumberColumn(COL["CAP_TRADE"], help="BTC"),
+        COL["CONTRACT_SIZE"]: st.column_config.NumberColumn(COL["CONTRACT_SIZE"], help="contracts (Deribit $1/contract)", step=1, disabled=True),
         COL["ENTRY"]: st.column_config.NumberColumn(COL["ENTRY"], help="prijs"),
         COL["SL"]:    st.column_config.NumberColumn(COL["SL"], help="prijs"),
         COL["TP1"]:   st.column_config.NumberColumn(COL["TP1"], help="prijs"),
         COL["TP2"]:   st.column_config.NumberColumn(COL["TP2"], help="prijs"),
         COL["TP3"]:   st.column_config.NumberColumn(COL["TP3"], help="prijs"),
-        "Plan_preview":     st.column_config.TextColumn("Plan", help="Klik onder de tabel op ‘🧾 Plan/Notities bewerken’ om volledige tekst te zien/bewaren.", disabled=True),
-        "Notities_preview": st.column_config.TextColumn("Notities", help="Klik onder de tabel op ‘🧾 Plan/Notities bewerken’.", disabled=True),
+        COL["RR_PLAN"]:   st.column_config.TextColumn(COL["RR_PLAN"], help="Max van TP’s; n.v.t. als SL=Entry of geen TP"),
+        COL["RR_ACTUAL"]: st.column_config.TextColumn(COL["RR_ACTUAL"], help="(ΣTP-PNL − Fees) / (Kapitaal×Risk%) — Exit telt niet mee"),
+        COL["PLAN"]:  st.column_config.TextColumn(COL["PLAN"], help="Voorbeeld in cel; volledige bewerking via bewerker hieronder"),
+        COL["NOTES"]: st.column_config.TextColumn(COL["NOTES"], help="Voorbeeld in cel; volledige bewerking via bewerker hieronder"),
     }
 
     edit_mode = st.toggle("✎ Bewerken/Toevoegen inschakelen", value=False,
@@ -240,10 +235,10 @@ with tab_journal:
         num_rows=("dynamic" if edit_mode else "fixed"),  # ghost row
         key="journal_editor",
     )
-    st.caption("Tip: zet ‘✎ Bewerken’ aan voor ghost row / inline edit. ‘Plan’ en ‘Notities’ bewerken via paneel hieronder.")
+    st.caption("Tip: zet ‘✎ Bewerken’ aan voor ghost row / inline edits.")
 
-    # Uitklapbare editor voor Plan/Notities
-    with st.expander("🧾 Plan/Notities bewerken (per trade)"):
+    # Plan/Notities bewerker (uitklap)
+    with st.expander("🧾 Plan/Notities bewerken"):
         all_ids = df_filtered[COL["TRADE_ID"]].astype(str).tolist()
         sel_id = st.selectbox("Kies Trade_ID", ["(geen)"] + all_ids, index=0)
         if sel_id != "(geen)":
@@ -261,41 +256,37 @@ with tab_journal:
                 except Exception as e:
                     st.error(f"Opslaan mislukt: {e}")
 
-    # Opslaan/Verwijderen (inline edits)
+    # Opslaan/Verwijderen
     def _map_row_to_payload(r: pd.Series, base_row: dict) -> dict:
-        out = {k: base_row.get(k, "") for k in ORDER}  # start met bestaande rij (behoud Plan/Notities etc.)
+        out = {k: base_row.get(k, "") for k in ORDER}
         tid = str(r.get("ID","")).strip() or str(base_row.get(COL["TRADE_ID"], "")).strip()
         out[COL["TRADE_ID"]] = tid
         out[COL["DATUM"]] = pd.to_datetime(r.get(COL["DATUM"]) or base_row.get(COL["DATUM"]) or pd.Timestamp.today()).strftime(DATE_FMT)
         out[COL["SIDE"]]  = str(r.get(COL["SIDE"], base_row.get(COL["SIDE"], ""))).strip()
         out[COL["SETUP"]] = str(r.get(COL["SETUP"], base_row.get(COL["SETUP"], ""))).strip()
         out[COL["RISK_PCT"]] = r.get(COL["RISK_PCT"], base_row.get(COL["RISK_PCT"], DEFAULT_RISK_PCT))
+        out[COL["CAP_TRADE"]] = r.get(COL["CAP_TRADE"], base_row.get(COL["CAP_TRADE"], ""))
+        out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
+        out[COL["RR_PLAN"]]   = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
+        out[COL["RR_ACTUAL"]] = r.get(COL["RR_ACTUAL"], base_row.get(COL["RR_ACTUAL"], ""))
+
         out[COL["ENTRY"]] = r.get(COL["ENTRY"], base_row.get(COL["ENTRY"], ""))
         out[COL["SL"]]    = r.get(COL["SL"], base_row.get(COL["SL"], ""))
         out[COL["TP1"]]   = r.get(COL["TP1"], base_row.get(COL["TP1"], ""))
         out[COL["TP2"]]   = r.get(COL["TP2"], base_row.get(COL["TP2"], ""))
         out[COL["TP3"]]   = r.get(COL["TP3"], base_row.get(COL["TP3"], ""))
-        out[COL["FEES"]]  = r.get(COL["FEES"], base_row.get(COL["FEES"], ""))
-        out[COL["PNL_TP1"]] = r.get(COL["PNL_TP1"], base_row.get(COL["PNL_TP1"], ""))
-        out[COL["PNL_TP2"]] = r.get(COL["PNL_TP2"], base_row.get(COL["PNL_TP2"], ""))
-        out[COL["PNL_TP3"]] = r.get(COL["PNL_TP3"], base_row.get(COL["PNL_TP3"], ""))
-        # KeyError fix: altijd veilig .get op COL["PNL_EXIT"]
-        out[COL["PNL_EXIT"]] = r.get(COL["PNL_EXIT"], base_row.get(COL["PNL_EXIT"], ""))
-        out[COL["EMOTIES"]]  = r.get(COL["EMOTIES"], base_row.get(COL["EMOTIES"], ""))
-        out[COL["SHOTS"]]    = r.get(COL["SHOTS"], base_row.get(COL["SHOTS"], ""))
-        # autos (worden bij load opnieuw berekend, maar meeschrijven kan)
-        out[COL["RISK_BTC"]]      = r.get(COL["RISK_BTC"], base_row.get(COL["RISK_BTC"], ""))
-        out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
-        out[COL["RR_PLAN"]]       = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
-        out[COL["RR_ACTUAL"]]     = r.get(COL["RR_ACTUAL"], base_row.get(COL["RR_ACTUAL"], ""))
-        return out
 
-    def _keyed(df_):
-        m = {}
-        for _, r in df_.iterrows():
-            tid = str(r.get("ID","")).strip() or str(r.get(COL["TRADE_ID"], "")).strip()
-            if tid: m[tid] = r
-        return m
+        out[COL["FEES"]]     = r.get(COL["FEES"], base_row.get(COL["FEES"], ""))
+        out[COL["PNL_TP1"]]  = r.get(COL["PNL_TP1"], base_row.get(COL["PNL_TP1"], ""))
+        out[COL["PNL_TP2"]]  = r.get(COL["PNL_TP2"], base_row.get(COL["PNL_TP2"], ""))
+        out[COL["PNL_TP3"]]  = r.get(COL["PNL_TP3"], base_row.get(COL["PNL_TP3"], ""))
+        out[COL["PNL_EXIT"]] = r.get(COL["PNL_EXIT"], base_row.get(COL["PNL_EXIT"], ""))  # KeyError-safe
+
+        out[COL["PLAN"]]   = r.get(COL["PLAN"], base_row.get(COL["PLAN"], ""))
+        out[COL["NOTES"]]  = r.get(COL["NOTES"], base_row.get(COL["NOTES"], ""))
+        out[COL["EMOTIES"]]= r.get(COL["EMOTIES"], base_row.get(COL["EMOTIES"], ""))
+        out[COL["SHOTS"]]  = r.get(COL["SHOTS"], base_row.get(COL["SHOTS"], ""))
+        return out
 
     base_map = { str(r[COL["TRADE_ID"]]): r.to_dict() for _, r in df_view.iterrows() }
 
@@ -314,9 +305,9 @@ with tab_journal:
                 st.error(f"Opslaan mislukt: {e}")
 
         if do_save:
-            new_map  = _keyed(edited)
             ok_all = True
-            for tid, row in new_map.items():
+            for idx, row in edited.iterrows():
+                tid = str(row.get("ID","")).strip()
                 base_row = base_map.get(tid, {k:"" for k in ORDER})
                 payload = _map_row_to_payload(row, base_row)
                 try:
@@ -326,7 +317,7 @@ with tab_journal:
                         append_entry(payload)
                 except Exception as e:
                     ok_all = False
-                    st.error(f"Opslaan mislukt ({tid}): {e}")
+                    st.error(f"Opslaan mislukt ({tid or f'row#{idx+1}'}): {e}")
             if ok_all:
                 st.success("Wijzigingen opgeslagen ✅")
                 if APP.get("gh_sync_enabled", False):
@@ -337,3 +328,4 @@ with tab_journal:
     if st.button("Exporteer zichtbare rijen (.csv)"):
         out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
+
