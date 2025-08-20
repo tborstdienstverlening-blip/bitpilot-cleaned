@@ -1,6 +1,7 @@
-# risk_utils.py — R0.2-04o (alleen rij-velden)
+# risk_utils.py — R0.2-04p (schaal & afronden: HALF_UP; alleen rij-velden)
 from __future__ import annotations
 import math
+from decimal import Decimal, ROUND_HALF_UP
 
 def _f(x):
     try:
@@ -9,33 +10,38 @@ def _f(x):
     except Exception:
         return None
 
-def round_contracts(x: float, mode: str = "floor") -> int:
-    if x is None: return 0
-    if mode == "ceil":  return math.ceil(x)
-    if mode == "round": return round(x)
-    return math.floor(x)  # default
+def round_contracts_nearest(x: float) -> int:
+    """Rond naar dichtstbijzijnde hele contract (HALF_UP)."""
+    if x is None:
+        return 0
+    return int(Decimal(x).quantize(0, rounding=ROUND_HALF_UP))
 
-def contracts_from_row(cap_btc, risk_pct_value, entry, sl, rounding_cfg="floor"):
+def contracts_from_row(cap_btc, risk_pct_value, entry, sl):
     """
-    Deribit BTC-PERP (1 contract = $1).
+    Deribit BTC-PERP (1 contract = $1). Alleen rij-velden.
     cap_btc: 'Kapitaal (trade)' (BTC)
-    risk_pct_value: bijvoorbeeld 1.0 (=1%) of 0.01 (ook toegestaan)
+    risk_pct_value: bijv. 1.0 (==1%), 0.8 (==0.8%), enz.
     entry/sl: prijzen
     Returns: (risk_btc, contracts_int) of (None, None) bij ongeldige invoer
     """
-    entry = _f(entry); sl = _f(sl)
-    cap  = _f(cap_btc)
-    if cap is None or entry is None or sl is None: return (None, None)
-    if entry == 0 or entry == sl: return (None, None)
+    entry = _f(entry); sl = _f(sl); cap = _f(cap_btc)
+    if entry is None or sl is None or cap is None: 
+        return (None, None)
+    if entry == 0 or entry == sl or cap <= 0:
+        return (None, None)
 
     rp = _f(risk_pct_value)
-    if rp is None: return (None, None)
-    risk_frac = rp/100.0 if rp > 1 else rp
+    if rp is None or rp <= 0:
+        return (None, None)
+
+    # ✅ schaalfix: 1.0 => 1% => 0.01
+    risk_frac = rp / 100.0
 
     sl_distance_pct = abs(entry - sl) / entry
-    if sl_distance_pct <= 0: return (None, None)
+    if sl_distance_pct <= 0:
+        return (None, None)
 
     risk_btc = float(cap) * risk_frac
-    contracts = (risk_btc * entry) / sl_distance_pct
-    contracts = round_contracts(contracts, str(rounding_cfg or "floor"))
+    raw_contracts = (risk_btc * entry) / sl_distance_pct
+    contracts = round_contracts_nearest(raw_contracts)
     return (float(risk_btc), float(contracts))
