@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation, getcontext
 from typing import Optional, Any
 
-# Zorg voor voldoende precisie voor BTC (8+ decimals) zonder vroegtijdig afronden
+# Voldoende precisie voor BTC (8+ decimalen) zonder vroegtijdig afronden
 getcontext().prec = 28
 
 
@@ -78,3 +78,25 @@ def format_btc_fixed8(value: Optional[float | Decimal]) -> str:
     q = d.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
     s = f"{q:.8f}"
     return _trim_neg_zero(s)
+
+
+def format_pct_signed(pct: Optional[float], decimals: int = 2) -> str:
+    """
+    Percentage met teken en vaste decimalen; None -> "—".
+    Vermijdt '-0.00%' door 0 altijd positief weer te geven.
+    """
+    if pct is None:
+        return "—"
+    try:
+        d = float(pct)
+    except Exception:
+        return "—"
+    s = f"{d:.{decimals}f}"
+    try:
+        # normaliseer -0.00 -> 0.00
+        if Decimal(s) == 0:
+            s = f"{0:.{decimals}f}"
+    except Exception:
+        pass
+    sign = "+" if d > 0 else ""
+    return f"{sign}{s}%"
