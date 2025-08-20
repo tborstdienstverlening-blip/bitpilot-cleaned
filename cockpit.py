@@ -8,7 +8,7 @@ import streamlit as st
 
 # Repo-modules
 from schema import COL, ORDER, DATE_FMT
-from utils_config import load_config, format_btc
+from utils_config import load_config
 from journal_store import (
     load_journal,
     append_entry,
@@ -90,24 +90,34 @@ def _next_sequential_id(existing_ids: List[str]) -> str:
     return str(nxt)
 
 
-def _last_trade_info(df: pd.DataFrame) -> Tuple[Optional[float], Optional[str], Optional[int], Optional[int]]:
-    """
-    Retourneert (last_pnl_exit, result_text, last_win_add, last_loss_add)
-    - result_text: 'Win'/'Loss'/'Break-even'/None
-    - last_win_add: 1 als Win anders 0 of None
-    - last_loss_add: 1 als Loss anders 0 of None
-    """
-    if df is None or df.empty:
-        return None, None, None, None
-    row = df.iloc[-1]
-    pnl = _to_num(row.get(COL["PNL_EXIT"]))
-    if pnl is None:
-        return None, None, None, None
-    if pnl > 0:
-        return pnl, "Win", 1, 0
-    if pnl < 0:
-        return pnl, "Loss", 0, 1
-    return 0.0, "Break-even", 0, 0
+# BTC-formatting: hoofdwaarden en onderbalkjes
+def fmt_btc_compact(x: Optional[float]) -> str:
+    """Duizendscheiding, max 3 dec als |x|>=0.001, anders tot 8 dec; trim trailing nullen."""
+    if x is None:
+        return "—"
+    x = float(x)
+    if abs(x) >= 0.001:
+        s = f"{x:,.3f}"
+    else:
+        s = f"{x:,.8f}"
+    s = s.rstrip("0").rstrip(".")
+    return s
+
+
+def fmt_btc_delta(x: Optional[float], suffix: str = "") -> Optional[str]:
+    """Delta tekst met teken en compact BTC-format; None -> None (geen badge)."""
+    if x is None:
+        return None
+    sign = "+" if x > 0 else ""
+    return f"{sign}{fmt_btc_compact(x)}{(' ' + suffix) if suffix else ''}"
+
+
+def fmt_roi_signed(pct: Optional[float]) -> str:
+    """ROI met teken en 2 decimals; None -> '—'."""
+    if pct is None:
+        return "—"
+    sign = "+" if pct > 0 else ""
+    return f"{sign}{pct:.2f}%"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -242,7 +252,7 @@ with tab_journal:
         df_raw[COL["CAP_TRADE"]] = ""
 
     # ──────────────────────────────────────────────────────────────────────
-    # Backend autos: Contract size + RR's + PNL_Exit (som TP's)
+    # Backend autos: Contract size + RR's + PNL_Exit (som TP's, lege = 0)
     # ──────────────────────────────────────────────────────────────────────
     def _row_autos(row: pd.Series) -> pd.Series:
         # Contract Size
@@ -281,16 +291,16 @@ with tab_journal:
             rr_plan = max(cands) if cands else None
         row[COL["RR_PLAN"]] = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
 
-        # ✅ PNL Exit = som van TP's
-        tpsum = sum([x for x in (tp1, tp2, tp3) if x is not None])
-        row[COL["PNL_EXIT"]] = "" if (tp1 is None and tp2 is None and tp3 is None) else tpsum
+        # ✅ PNL Exit = som van TP's (None -> 0)
+        tpsum = sum([x for x in (tp1 or 0.0, tp2 or 0.0, tp3 or 0.0)])
+        row[COL["PNL_EXIT"]] = tpsum
 
         # RR (Actueel) — NETTO met rij-risk (Kapitaal×Risk%) obv TP-som (via Exit)
         risk_btc, _ = contracts_from_row(cap, risk_pct_val, entry, sl)
         fees = _to_num(row.get(COL["FEES"])) or 0.0
-        pnl_for_rr = _to_num(row.get(COL["PNL_EXIT"]))
+        pnl_for_rr = tpsum
         rr_actual = None
-        if risk_btc not in (None, 0) and pnl_for_rr is not None:
+        if risk_btc not in (None, 0):
             rr_actual = (pnl_for_rr - fees) / risk_btc
         row[COL["RR_ACTUAL"]] = "n.v.t." if rr_actual is None else f"{rr_actual:.2f}"
 
@@ -321,62 +331,77 @@ with tab_journal:
     )
 
     # ──────────────────────────────────────────────────────────────────────
-    # KPI-balk — herstelde set + badges laatste trade
+    # KPI-balk — herstelde set + badges laatste trade + fees-fix
     # ──────────────────────────────────────────────────────────────────────
-    # cumulatief
     if not df_filtered.empty:
-        fees_total = float((df_filtered[COL["FEES"]].fillna(0)).sum())
-        pnl_exit_vals = pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce")
-        pnl_cum = float(pnl_exit_vals.fillna(0).sum() - fees_total)
-        wins = int((pnl_exit_vals > 0).sum())
-        losses = int((pnl_exit_vals < 0).sum())
-        total_trades = wins + losses + int((pnl_exit_vals == 0).sum())
+        fees_series = pd.to_numeric(df_filtered[COL["FEES"]], errors="coerce").fillna(0.0)
+        pnl_exit_vals = pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce").fillna(0.0)
+
+        fees_total = float(fees_series.sum())
+        pnl_gross_total = float(pnl_exit_vals.sum())            # Σ Exit (som TP's)
+        pnl_net_total = pnl_gross_total - fees_total            # Σ Exit − Σ Fees
+
+        # Laatste trade
+        last_row = df_filtered.iloc[-1]
+        last_pnl = float(pd.to_numeric(pd.Series([last_row.get(COL["PNL_EXIT"])]), errors="coerce").fillna(0.0).iloc[0])
+        last_fee = float(pd.to_numeric(pd.Series([last_row.get(COL["FEES"])]), errors="coerce").fillna(0.0).iloc[0])
+        last_net = last_pnl - last_fee
+        last_result = "Win" if last_pnl > 0 else ("Loss" if last_pnl < 0 else "Break-even")
+        last_win_add = 1 if last_pnl > 0 else 0 if last_pnl < 0 else 0
+        last_loss_add = 1 if last_pnl < 0 else 0 if last_pnl > 0 else 0
     else:
         fees_total = 0.0
-        pnl_cum = 0.0
-        wins = 0
-        losses = 0
-        total_trades = 0
+        pnl_gross_total = 0.0
+        pnl_net_total = 0.0
+        last_pnl = None
+        last_fee = None
+        last_net = None
+        last_result = None
+        last_win_add = None
+        last_loss_add = None
 
-    acct_now = (START_UI + pnl_cum) if START_UI is not None else None
+    acct_now = (START_UI + pnl_net_total) if START_UI is not None else None
     roi_pct = None
     if START_UI and START_UI != 0:
-        roi_pct = (acct_now / START_UI - 1.0) * 100.0 if acct_now is not None else None
+        roi_pct = (pnl_net_total / START_UI) * 100.0
 
+    last_roi_pp = None
+    if START_UI and START_UI != 0 and last_net is not None:
+        last_roi_pp = (last_net / START_UI) * 100.0
+
+    # Winrate cumulatief (volgens definitie van ticket)
+    wins = int((pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce").fillna(0.0) > 0).sum()) if not df_filtered.empty else 0
+    losses = int((pd.to_numeric(df_filtered[COL["PNL_EXIT"]], errors="coerce").fillna(0.0) < 0).sum()) if not df_filtered.empty else 0
     winrate_pct = (wins / max(wins + losses, 1) * 100.0) if (wins + losses) > 0 else None
 
-    # laatste trade
-    last_pnl, last_result, last_win_add, last_loss_add = _last_trade_info(df_filtered)
-    last_roi_pp = None
-    if START_UI and START_UI != 0 and last_pnl is not None:
-        last_roi_pp = (last_pnl / START_UI) * 100.0
-
+    # KPI layout (8 tegels, identiek set als origineel)
     r1 = st.columns(4)
     r2 = st.columns(4)
 
     # Rij 1
-    r1[0].metric("Startkapitaal (BTC)", format_btc(START_UI))
-    acct_text = "—" if acct_now is None else format_btc(acct_now)
-    acct_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)} laatste trade" if last_pnl > 0 else f"{format_btc(last_pnl)} laatste trade")
-    r1[1].metric("Actueel kapitaal (BTC)", acct_text, delta=acct_delta)
-    pnl_text = format_btc(pnl_cum)
-    pnl_delta = None if last_pnl is None else (f"+{format_btc(last_pnl)} laatste trade" if last_pnl > 0 else f"{format_btc(last_pnl)} laatste trade")
-    r1[2].metric("Totale PnL (BTC)", pnl_text, delta=pnl_delta)
-    r1[3].metric("Totale Fees (BTC)", format_btc(fees_total))
+    r1[0].metric("Startkapitaal (BTC)", fmt_btc_compact(START_UI))
+    r1[1].metric(
+        "Actueel kapitaal (BTC)",
+        fmt_btc_compact(acct_now),
+        delta=fmt_btc_delta(last_net, "laatste trade"),
+    )
+    r1[2].metric(
+        "Totale PnL (BTC)",
+        fmt_btc_compact(pnl_net_total),   # netto PnL toont logischer; evt. maak 'Bruto PnL' apart als nodig
+        delta=fmt_btc_delta(last_net, "laatste trade"),
+    )
+    r1[3].metric(
+        "Totale Fees (BTC)",
+        fmt_btc_compact(fees_total),
+        delta=fmt_btc_delta(last_fee),
+    )
 
     # Rij 2
-    roi_text = "—" if roi_pct is None else f"{roi_pct:.2f}%"
-    roi_delta = None if last_roi_pp is None else (f"+{last_roi_pp:.2f}% laatste trade" if last_roi_pp > 0 else f"{last_roi_pp:.2f}% laatste trade")
-    r2[0].metric("ROI %", roi_text, delta=roi_delta)
-
-    wins_delta = None if last_win_add is None else f"+{last_win_add}"
-    losses_delta = None if last_loss_add is None else f"+{last_loss_add}"
-    r2[1].metric("Winnende trades", f"{wins}", delta=wins_delta)
-    r2[2].metric("Verloren trades", f"{losses}", delta=losses_delta)
-
-    winrate_text = "—" if winrate_pct is None else f"{winrate_pct:.2f}%"
+    r2[0].metric("ROI %", fmt_roi_signed(roi_pct), delta=(fmt_roi_signed(last_roi_pp) if last_roi_pp is not None else None))
+    r2[1].metric("Winnende trades", f"{wins}", delta=(f"+{last_win_add}" if last_win_add is not None else None))
+    r2[2].metric("Verloren trades", f"{losses}", delta=(f"+{last_loss_add}" if last_loss_add is not None else None))
     last_result_text = "—" if last_result is None else f"Laatst: {last_result}"
-    r2[3].metric("Winrate %", winrate_text, delta=last_result_text)
+    r2[3].metric("Winrate %", ("—" if winrate_pct is None else f"{winrate_pct:.2f}%"), delta=last_result_text)
 
     st.divider()
 
@@ -414,7 +439,7 @@ with tab_journal:
         if col not in df_view.columns:
             df_view[col] = ""
 
-    # Inputs met komma/punt als TEXT laten (decimalen)
+    # Inputs met komma/punt als TEXT laten (prijzen/kapitaal)
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
@@ -442,7 +467,7 @@ with tab_journal:
         COL["RR_ACTUAL"]: st.column_config.TextColumn(
             COL["RR_ACTUAL"], help="(ΣTP-PNL − Fees) / (Kapitaal×Risk%) — Exit telt niet mee"
         ),
-        COL["PNL_EXIT"]: st.column_config.NumberColumn(COL["PNL_EXIT"], help="som van TP1–TP3; auto"),
+        COL["PNL_EXIT"]: st.column_config.NumberColumn(COL["PNL_EXIT"], help="som van PNL_TP1–3; auto"),
         COL["FEES"]: st.column_config.NumberColumn(COL["FEES"], help="fees (BTC)"),
         COL["PLAN"]: st.column_config.TextColumn(COL["PLAN"]),
         COL["NOTES"]: st.column_config.TextColumn(COL["NOTES"]),
@@ -468,7 +493,10 @@ with tab_journal:
     else:
         # Read-only view met kleur op PNL_Exit en TP1–TP3
         df_show = df_view[vis_cols].copy()
-        for c in [COL["PNL_EXIT"], COL["TP1"], COL["TP2"], COL["TP3"]]:
+        for c in [COL["PNL_EXIT"]]:
+            df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
+        # Voor TP-kolommen kunnen dit prijsvelden zijn; kleur alleen als numeriek interpreteerbaar
+        for c in [COL["TP1"], COL["TP2"], COL["TP3"]]:
             df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
 
         def _cell_color(v):
@@ -478,16 +506,16 @@ with tab_journal:
                 return "background-color: #0f5132; color: white;"  # groen
             if v < 0:
                 return "background-color: #842029; color: white;"  # rood
-            return ""
+            return ""  # 0 => geen kleur
 
         styler = (
             df_show.style
             .applymap(_cell_color, subset=[COL["PNL_EXIT"], COL["TP1"], COL["TP2"], COL["TP3"]])
             .format({
-                COL["PNL_EXIT"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
-                COL["TP1"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
-                COL["TP2"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
-                COL["TP3"]: lambda x: "" if pd.isna(x) else f"{x:.8f}".rstrip("0").rstrip("."),
+                COL["PNL_EXIT"]: lambda x: "" if pd.isna(x) else fmt_btc_compact(float(x)),
+                COL["TP1"]: lambda x: "" if pd.isna(x) else fmt_btc_compact(float(x)),
+                COL["TP2"]: lambda x: "" if pd.isna(x) else fmt_btc_compact(float(x)),
+                COL["TP3"]: lambda x: "" if pd.isna(x) else fmt_btc_compact(float(x)),
             })
         )
         st.dataframe(styler, use_container_width=True, hide_index=True)
@@ -535,15 +563,13 @@ with tab_journal:
         out[COL["TP1"]] = r.get(COL["TP1"], base_row.get(COL["TP1"], ""))
         out[COL["TP2"]] = r.get(COL["TP2"], base_row.get(COL["TP2"], ""))
         out[COL["TP3"]] = r.get(COL["TP3"], base_row.get(COL["TP3"], ""))
-        # ✅ PNL Exit = som van TP's
+        # ✅ PNL Exit = som van PNL_TP1–3 (None -> 0)
         tpsum = 0.0
-        any_tp = False
         for val in [r.get(COL["TP1"]), r.get(COL["TP2"]), r.get(COL["TP3"])]:
             x = _to_num(val)
             if x is not None:
                 tpsum += x
-                any_tp = True
-        out[COL["PNL_EXIT"]] = "" if not any_tp else tpsum
+        out[COL["PNL_EXIT"]] = tpsum
         # Afgeleiden/overig
         out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
         out[COL["RR_PLAN"]] = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
@@ -640,3 +666,4 @@ with tab_journal:
     if st.button("Exporteer zichtbare rijen (.csv)"):
         out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
+
