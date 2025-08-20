@@ -11,7 +11,7 @@ from app_state import load_state, save_state
 from backup_utils import make_backup_zip
 import github_sync
 
-from kpi_utils import with_pnl_total, apply_filters, compute_kpis
+from kpi_utils import apply_filters, compute_kpis
 from risk_utils import contracts_from_row
 
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
@@ -21,8 +21,6 @@ CFG = load_config()
 APP = load_state()
 
 START_UI = float(APP.get("start_kapitaal", CFG.get("START_KAPITAAL", 0)))
-RISK_ROUND = (CFG.get("risk", {}).get("rounding")
-              if isinstance(CFG.get("risk"), dict) else CFG.get("RISK_ROUNDING", "floor"))
 DEFAULT_RISK_PCT = (CFG.get("risk", {}).get("percent")
                     if isinstance(CFG.get("risk"), dict) else CFG.get("RISK_PERCENT", 1.0))
 
@@ -35,10 +33,6 @@ def _to_num(s):
         return None if t=="" else float(t)
     except Exception:
         return None
-
-def _short(txt: str, n=60):
-    txt = str(txt or "")
-    return txt if len(txt) <= n else txt[:n] + "…"
 
 # ---------- Tabs ----------
 tab_journal, tab_settings = st.tabs(["📓 Journal", "⚙️ Settings"])
@@ -115,7 +109,7 @@ with tab_journal:
         if col not in df_raw.columns:
             df_raw[col] = ""
 
-    # ---- DTYPE FIX: forceer tekstkolommen naar string (anders klaagt data_editor bij TextColumn)
+    # ---- DTYPE FIX: forceer tekstkolommen naar string (voor TextColumn)
     TEXT_COLS = [
         COL["PLAN"], COL["NOTES"], COL["EMOTIES"], COL["SHOTS"],
         COL["SETUP"], COL["SIDE"]
@@ -139,8 +133,9 @@ with tab_journal:
         cap   = _to_num(row.get(COL["CAP_TRADE"]))
         risk_pct_val = _to_num(row.get(COL["RISK_PCT"])) if row.get(COL["RISK_PCT"]) is not None else DEFAULT_RISK_PCT
 
-        risk_btc, contracts = contracts_from_row(cap, risk_pct_val, entry, sl, RISK_ROUND)
-        row[COL["CONTRACT_SIZE"]] = "" if contracts is None else int(contracts)
+        # ✅ schaalfix + nearest afronding
+        risk_btc, contracts = contracts_from_row(cap, risk_pct_val, entry, sl)
+        row[COL["CONTRACT_SIZE"]] = None if contracts is None else int(contracts)
 
         # RR (Plan)
         side = (row.get(COL["SIDE"]) or "").strip().lower()
@@ -160,7 +155,7 @@ with tab_journal:
             rr_plan = max(cands) if cands else None
         row[COL["RR_PLAN"]] = "n.v.t." if rr_plan is None else f"{rr_plan:.2f}"
 
-        # RR (Actueel) — netto per rij met rij-risk
+        # RR (Actueel) — NETTO met rij-risk (Kapitaal×Risk%)
         pnl_tp = sum([x for x in [_to_num(row.get(COL["PNL_TP1"])),
                                   _to_num(row.get(COL["PNL_TP2"])),
                                   _to_num(row.get(COL["PNL_TP3"]))] if x is not None])
@@ -174,6 +169,17 @@ with tab_journal:
 
     df_auto = df_raw.apply(_row_autos, axis=1)
 
+    # Converteer numerieke kolommen naar numeriek dtype (voor NumberColumn-compat)
+    NUM_COLS = [COL["RISK_PCT"], COL["CAP_TRADE"], COL["CONTRACT_SIZE"],
+                COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"],
+                COL["FEES"], COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
+    for c in NUM_COLS:
+        if c in df_auto.columns:
+            df_auto[c] = pd.to_numeric(df_auto[c], errors="coerce")
+    # Contract size als Int64 (nullable)
+    if COL["CONTRACT_SIZE"] in df_auto.columns:
+        df_auto[COL["CONTRACT_SIZE"]] = df_auto[COL["CONTRACT_SIZE"]].astype("Int64")
+
     # Filters toepassen (geen Tags)
     filt = APP.get("filters", {"periode":"Alle","search":"","emoties":[]})
     df_filtered = apply_filters(df_auto, search=filt.get("search",""),
@@ -181,6 +187,7 @@ with tab_journal:
                                 periode=filt.get("periode","Alle"))
 
     # KPI-balk (NETTO: Σ[coalesce(ΣTP, Exit, 0) − Fees])
+    from kpi_utils import compute_kpis  # late import to be safe
     k = compute_kpis(df_filtered, start_btc=START_UI)
     def _pct(x): return "—" if x is None else f"{x:.2f}%"
     r1 = st.columns(4)
@@ -202,7 +209,7 @@ with tab_journal:
     if df_filtered.empty:
         st.info("Nog geen trades in selectie.")
 
-    # Definitieve zichtbare kolommen
+    # Definitieve zichtbare kolommen (zonder Risk (BTC))
     vis_cols = [
         COL["DATUM"], "ID", COL["SIDE"], COL["SETUP"],
         COL["RISK_PCT"], COL["CAP_TRADE"], COL["CONTRACT_SIZE"],
@@ -289,7 +296,7 @@ with tab_journal:
         out[COL["PNL_TP1"]]  = r.get(COL["PNL_TP1"], base_row.get(COL["PNL_TP1"], ""))
         out[COL["PNL_TP2"]]  = r.get(COL["PNL_TP2"], base_row.get(COL["PNL_TP2"], ""))
         out[COL["PNL_TP3"]]  = r.get(COL["PNL_TP3"], base_row.get(COL["PNL_TP3"], ""))
-        out[COL["PNL_EXIT"]] = r.get(COL["PNL_EXIT"], base_row.get(COL["PNL_EXIT"], ""))  # KeyError-safe
+        out[COL["PNL_EXIT"]] = r.get(COL["PNL_EXIT"], base_row.get(COL["PNL_EXIT"], ""))  # safe
 
         out[COL["PLAN"]]   = r.get(COL["PLAN"], base_row.get(COL["PLAN"], ""))
         out[COL["NOTES"]]  = r.get(COL["NOTES"], base_row.get(COL["NOTES"], ""))
