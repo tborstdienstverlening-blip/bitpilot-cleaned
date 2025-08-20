@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from typing import List
+import math
+import re
+from decimal import Decimal, InvalidOperation
 import pandas as pd
 import streamlit as st
 
@@ -12,9 +15,32 @@ from app_state import load_state, save_state
 from journal_store import append_entry, update_entry, delete_entry
 from utils.ids import key as keygen
 
-# Alle PNL-kolommen + Fees op 8 decimalen tonen
+# Alle PNL-kolommen + Fees met 8 decimalen
 _PNL_INPUT_COLS = [COL["PNL_TP1"], COL["PNL_TP2"], COL["PNL_TP3"], COL["PNL_EXIT"]]
-_PNL_SHOW_COLS  = [* _PNL_INPUT_COLS, "PNL_BTC", COL["FEES"]]
+_PNL_SHOW_COLS  = [*_PNL_INPUT_COLS, "PNL_BTC", COL["FEES"]]
+
+def _as_float(s):
+    """EU/EN string -> float (accepteert ',' of '.')"""
+    if isinstance(s, (int, float)):
+        if isinstance(s, float) and (math.isnan(s) or math.isinf(s)):
+            return None
+        return float(s)
+    try:
+        t = str(s).strip()
+        if t == "":
+            return None
+        # verwijder spaties en vreemde separators
+        t = t.replace(" ", "").replace("\u00A0", "")
+        t = re.sub(r"[’'_]", "", t)
+        # als zowel . als , voorkomen en , is de laatste -> . = thousands, , = decimals
+        if "," in t and "." in t and t.rfind(",") > t.rfind("."):
+            t = t.replace(".", "")
+            t = t.replace(",", ".")
+        else:
+            t = t.replace(",", ".")
+        return float(Decimal(t))
+    except (InvalidOperation, ValueError):
+        return None
 
 def _format_fixed8(x) -> str:
     if pd.isna(x) or x is None:
@@ -23,16 +49,6 @@ def _format_fixed8(x) -> str:
         return f"{float(x):.8f}"
     except Exception:
         return ""
-
-def _as_float(s):
-    """EU/EN string -> float (accepteert ',' of '.')"""
-    if isinstance(s, (int, float)):
-        return float(s)
-    try:
-        t = str(s).strip().replace(",", ".")
-        return None if t == "" else float(t)
-    except Exception:
-        return None
 
 def row_is_empty(row: pd.Series) -> bool:
     keys = [COL["SIDE"], COL["RISK_PCT"], COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]
@@ -81,7 +97,7 @@ def map_row_to_payload(r: pd.Series, base_row: dict) -> dict:
         val = to_num(r.get(k))
         out[k] = 0.0 if val is None else float(val)
 
-    # Overig
+    # Overig (Fees laten we ongewijzigd opslaan zoals in je bestaande flow)
     out[COL["CONTRACT_SIZE"]] = r.get(COL["CONTRACT_SIZE"], base_row.get(COL["CONTRACT_SIZE"], ""))
     out[COL["RR_PLAN"]] = r.get(COL["RR_PLAN"], base_row.get(COL["RR_PLAN"], ""))
     out[COL["RR_ACTUAL"]] = r.get(COL["RR_ACTUAL"], base_row.get(COL["RR_ACTUAL"], ""))
@@ -96,11 +112,15 @@ def map_row_to_payload(r: pd.Series, base_row: dict) -> dict:
 def render_table(df_view: pd.DataFrame) -> None:
     """
     Journal-tabel met read-only en edit-mode + CRUD/ghost-row.
-    Doel fixes:
-      - 8 decimalen (geen e-notatie) voor PNL_* + Fees
+
+    Fixes:
+      - Fees: TextColumn -> je kunt nu '0,00050000' invoeren (ook '.')
+      - PNL_BTC weergave = TP1+TP2+TP3+Exit − Fees (UI-only), onafgerond
+      - 8 decimalen voor PNL-kolommen en Fees in beide modi
       - Toggle 'Bewerken' verandert geen waarden t.o.v. read-only
-      - PNL_BTC weergave = TP1+TP2+TP3+Exit − Fees (alleen UI, export blijft raw)
     """
+    df_view = df_view.copy()
+
     # Definitieve zichtbare kolommen
     vis_cols = [
         COL["DATUM"], "ID", COL["SIDE"], COL["SETUP"], COL["RISK_PCT"], COL["CAP_TRADE"], COL["CONTRACT_SIZE"],
@@ -110,19 +130,23 @@ def render_table(df_view: pd.DataFrame) -> None:
     ]
     for col in vis_cols:
         if col not in df_view.columns:
-            df_view[col] = "" if col not in ("PNL_BTC", * _PNL_INPUT_COLS) else 0.0
+            df_view[col] = "" if col not in ("PNL_BTC", *_PNL_INPUT_COLS) else 0.0
 
     # Vrije tekstinvoer voor prijsvelden (EU/punt)
     for c in [COL["CAP_TRADE"], COL["ENTRY"], COL["SL"], COL["TP1"], COL["TP2"], COL["TP3"]]:
         if c in df_view.columns:
             df_view[c] = pd.Series(df_view[c], dtype="string").fillna("")
 
-    # PNL input-kolommen als string (TextColumn), maar voorgeladen op 8 dec voor consistente view
+    # PNL input-kolommen als string (TextColumn), voorgeladen op 8 dec
     for c in _PNL_INPUT_COLS:
         if c in df_view.columns:
             df_view[c] = pd.Series(df_view[c]).map(lambda v: _format_fixed8(_as_float(v))).astype("string")
 
-    # Kolomconfig (NumberColumn met 8 dec voor PNL_BTC & Fees; inputs blijven TextColumn)
+    # Fees óók als string (TextColumn) voor komma-invoer
+    if COL["FEES"] in df_view.columns:
+        df_view[COL["FEES"]] = pd.Series(df_view[COL["FEES"]]).map(lambda v: _format_fixed8(_as_float(v))).astype("string")
+
+    # Kolomconfig
     colcfg = {
         COL["SIDE"]:     st.column_config.SelectboxColumn(COL["SIDE"], options=["Long", "Short"], help="Richting van de trade"),
         COL["RISK_PCT"]: st.column_config.NumberColumn(COL["RISK_PCT"], help="percentage van Kapitaal (trade)", min_value=0.1, max_value=5.0, step=0.1),
@@ -140,7 +164,8 @@ def render_table(df_view: pd.DataFrame) -> None:
         COL["PNL_TP3"]:   st.column_config.TextColumn(COL["PNL_TP3"], help="pnl (BTC) — accepteert '.' of ','"),
         COL["PNL_EXIT"]:  st.column_config.TextColumn(COL["PNL_EXIT"], help="pnl (BTC) — accepteert '.' of ','"),
         "PNL_BTC":        st.column_config.NumberColumn("PNL_BTC", help="TP1+TP2+TP3+Exit (BTC)", disabled=True, format="%.8f"),
-        COL["FEES"]:      st.column_config.NumberColumn(COL["FEES"], help="fees (BTC)", format="%.8f", step=0.00000001),
+        # Belangrijk: Fees als TextColumn (nu kun je , of . type’n)
+        COL["FEES"]:      st.column_config.TextColumn(COL["FEES"], help="fees (BTC) — accepteert '.' of ','"),
         COL["PLAN"]:      st.column_config.TextColumn(COL["PLAN"]),
         COL["NOTES"]:     st.column_config.TextColumn(COL["NOTES"]),
     }
@@ -153,15 +178,15 @@ def render_table(df_view: pd.DataFrame) -> None:
     )
 
     if edit_mode:
-        # Edit-view: zet PNL_BTC (weergave) = ΣTP + Exit − Fees, zonder de onderliggende data te muteren
+        # Editor-view
         df_edit = df_view[vis_cols].reset_index(drop=True).copy()
 
-        # Fees en PNL_BTC voor editor als numeriek
-        fees = pd.to_numeric(df_edit[COL["FEES"]], errors="coerce").fillna(0.0)
-        tp1  = pd.to_numeric(df_edit[COL["PNL_TP1"]], errors="coerce").fillna(0.0)
-        tp2  = pd.to_numeric(df_edit[COL["PNL_TP2"]], errors="coerce").fillna(0.0)
-        tp3  = pd.to_numeric(df_edit[COL["PNL_TP3"]], errors="coerce").fillna(0.0)
-        pex  = pd.to_numeric(df_edit[COL["PNL_EXIT"]], errors="coerce").fillna(0.0)
+        # Parse alle PNL inputs + Fees via EU/EN parser voor berekening
+        fees = df_edit[COL["FEES"]].map(_as_float).fillna(0.0)
+        tp1  = df_edit[COL["PNL_TP1"]].map(_as_float).fillna(0.0)
+        tp2  = df_edit[COL["PNL_TP2"]].map(_as_float).fillna(0.0)
+        tp3  = df_edit[COL["PNL_TP3"]].map(_as_float).fillna(0.0)
+        pex  = df_edit[COL["PNL_EXIT"]].map(_as_float).fillna(0.0)
         df_edit["PNL_BTC"] = (tp1 + tp2 + tp3 + pex - fees).astype(float)
 
         edited = st.data_editor(
@@ -174,13 +199,13 @@ def render_table(df_view: pd.DataFrame) -> None:
             key=keygen("journal_editor"),
         )
     else:
-        # Read-only view: dezelfde waarden als edit, met 8-dec formatting
+        # Read-only view met dezelfde waarden (8 dec)
         df_show = df_view[vis_cols].copy()
 
-        # Converteer naar numeriek en bereken zichtbare PNL_BTC (ΣTP + Exit − Fees)
+        # Parse naar numeriek voor berekening + formatting
         for c in _PNL_SHOW_COLS:
             if c in df_show.columns:
-                df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
+                df_show[c] = df_show[c].map(_as_float)
 
         fees = df_show[COL["FEES"]].fillna(0.0)
         tp1  = df_show[COL["PNL_TP1"]].fillna(0.0)
@@ -206,7 +231,7 @@ def render_table(df_view: pd.DataFrame) -> None:
 
         edited = df_view[vis_cols].reset_index(drop=True)  # voor CRUD-blok
 
-    # CRUD controls
+    # CRUD controls (ongewijzigd)
     app = load_state()
     base_map = {str(r[COL["TRADE_ID"]]): r.to_dict() for _, r in df_view.iterrows() if str(r[COL["TRADE_ID"]]).strip()}
 
@@ -273,3 +298,4 @@ def render_table(df_view: pd.DataFrame) -> None:
                     st.info(msg)
 
                 st.rerun()
+
