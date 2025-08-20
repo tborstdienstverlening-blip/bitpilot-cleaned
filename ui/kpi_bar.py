@@ -6,7 +6,7 @@ from utils.formatters import format_btc, format_btc_delta, format_pct_signed
 
 def render_kpi_bar(start_btc: float, kpi: dict) -> None:
     """
-    KPI-balk (labels ongewijzigd) met 8-decimale BTC-weergave (geen sci-notatie).
+    Rendert KPI-balk exact zoals 07d (labels en onderbalkjes).
     """
     r1 = st.columns(4)
     r2 = st.columns(4)
