@@ -17,5 +17,7 @@ streamlit run cockpit.py
 - **AI‑Coach**: zet `OPENAI_API_KEY` in je omgeving. Budget wordt bewaakt; fallback is heuristisch.
 - **Settings**: Budget & modelkeuze, Kennisbank, **Events import met overrides**, Backup-retentie, Lijsten (Setup/Strategie).
 - **Export**: gefilterde CSV in `data/export/` met filters als comment op regel 1.
+
+- 
 - **Roadmap**: CP‑8 voegt definitieve risk/plantrouw KPI’s toe.
 
