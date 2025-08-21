@@ -23,13 +23,12 @@ from services.pnl_service import compute_autos
 from services.kpi_service import compute_kpis
 from ui.kpi_bar import render_kpi_bar
 from ui.journal_table import render_table
-
+from ui.ai_tab import render as render_ai_tab   # ← toegevoegd (AI-tab)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # App meta
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Bitpilot — Journal", layout="wide")
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Config & app-state
@@ -50,7 +49,6 @@ DEFAULT_RISK_PCT: float = (
 # Zorg dat filters bestaan
 APP.setdefault("filters", {"periode": "Alle", "search": "", "emoties": []})
 save_state(APP)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -85,12 +83,10 @@ def _parse_decimal_eu_en(s) -> float | None:
     except (InvalidOperation, ValueError):
         return None
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ──────────────────────────────────────────────────────────────────────────────
-tab_journal, tab_settings = st.tabs([" Journal", "⚙️ Settings"])
-
+tab_journal, tab_settings, tab_ai = st.tabs([" Journal", "⚙️ Settings", "AI"])  # ← 'AI' toegevoegd
 
 # =============================================================================
 # SETTINGS
@@ -158,7 +154,6 @@ with tab_settings:
         f"Laatste sync: {APP.get('last_sync_ts','—') or '—'} "
         f"({APP.get('last_sync_msg','Sync uit')})"
     )
-
 
 # =============================================================================
 # JOURNAL
@@ -267,3 +262,12 @@ with tab_journal:
     if st.button("Exporteer zichtbare rijen (.csv)"):
         out = export_visible(df_filtered)
         st.success(f"Export voltooid: `{out}`")
+
+# =============================================================================
+# AI (nieuwe tab)
+# =============================================================================
+with tab_ai:
+    # [AI_TAB_START]
+    render_ai_tab()
+    # [AI_TAB_END]
+
