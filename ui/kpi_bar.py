@@ -31,7 +31,6 @@ def _fmt_pct(value: Optional[float], decimals: int = 2) -> str:
         return "—"
     v = v * 100.0 if abs(v) <= 1.0 else v
     s = f"{v:.{decimals}f}"
-    # Anti negative zero
     if float(s) == 0.0:
         s = f"{0:.{decimals}f}"
     return f"{s}%"
@@ -45,7 +44,6 @@ def _winrate_with_indicator(winrate_val: Optional[float], kpi: Dict[str, Any]) -
     - Als geen indicator-keys: toon alleen het percentage.
     """
     pct = _fmt_pct(winrate_val, decimals=2)
-    # Als '—', geen pijltje tonen
     if pct == "—":
         return pct
 
@@ -78,9 +76,9 @@ def render(kpi: Dict[str, Any], start_btc: Optional[float]) -> None:
     Hoofdtiles (BTC) exact 8 decimalen; onderregels/labels/indicatoren identiek aan referentie:
 
       Onder Startkapitaal (BTC)  ->  ROI %
-      Onder Actueel (BTC)        ->  Winnende trades
+      Onder Actueel kapitaal (BTC) ->  Winnende trades
       Onder Totale PnL (BTC)     ->  Verloren trades
-      Onder Totale Fees (BTC)    ->  Winrate %    (met pijltje/indicator indien aanwezig)
+      Onder Totale Fees (BTC)    ->  Winrate % (met pijltje/indicator indien aanwezig)
 
     BTC-weergave: 8dp (trailing zeros), geen e-notatie, geen '-0.00000000'.
     Percentages: 2dp + '%', bij N/A '—'. Counts: integers.
@@ -90,7 +88,7 @@ def render(kpi: Dict[str, Any], start_btc: Optional[float]) -> None:
     pnl_btc_total = kpi.get("pnl_btc_total", 0) or 0
     fees_total = kpi.get("fees_total", 0) or 0
 
-    # Keys volgens ticket (met minimale fallback voor backward compat)
+    # Verwachte keys (met fallback)
     winners = kpi.get("winners")
     if winners is None:
         winners = kpi.get("winners_count") or kpi.get("wins")
@@ -111,40 +109,39 @@ def render(kpi: Dict[str, Any], start_btc: Optional[float]) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
 
-    # 1) Startkapitaal + ROI %
+    # 1) Startkapitaal + ROI % (2 regels in caption)
     with c1:
         st.metric(
             label="Startkapitaal (BTC)",
             value=format_btc(start_btc, decimals=8, fixed=True, thousands=False),
         )
         roi_str = "—" if total_trades == 0 else _fmt_pct(roi_val, decimals=2)
-        # Let op: exact label zonder dubbele punt
-        st.caption(f"ROI % {roi_str}")
+        st.caption(f"ROI %  \n{roi_str}")
 
-    # 2) Actueel + Winnende trades
+    # 2) Actueel kapitaal + Winnende trades (2 regels in caption)
     with c2:
         st.metric(
-            label="Actueel (BTC)",
+            label="Actueel kapitaal (BTC)",
             value=format_btc(acct_now, decimals=8, fixed=True, thousands=False),
         )
-        st.caption(f"Winnende trades {wins_i}")
+        st.caption(f"Winnende trades  \n{wins_i}")
 
-    # 3) Totale PnL + Verloren trades
+    # 3) Totale PnL + Verloren trades (2 regels in caption)
     with c3:
         st.metric(
             label="Totale PnL (BTC)",
             value=format_btc(pnl_btc_total, decimals=8, fixed=True, thousands=False),
         )
-        st.caption(f"Verloren trades {losses_i}")
+        st.caption(f"Verloren trades  \n{losses_i}")
 
-    # 4) Totale Fees + Winrate % (+ indicator indien aanwezig)
+    # 4) Totale Fees + Winrate % (+ indicator; 2 regels in caption)
     with c4:
         st.metric(
             label="Totale Fees (BTC)",
             value=format_btc(fees_total, decimals=8, fixed=True, thousands=False),
         )
         winrate_str = "—" if total_trades == 0 else _winrate_with_indicator(winrate_val, kpi)
-        st.caption(f"Winrate % {winrate_str}")
+        st.caption(f"Winrate %  \n{winrate_str}")
 
 
 def render_kpi_bar(a: Any, b: Any) -> None:
@@ -161,3 +158,4 @@ def render_kpi_bar(a: Any, b: Any) -> None:
         # Legacy volgorde (start_btc, kpi) fallback
         start_btc, kpi = a, b
     render(kpi, start_btc)
+
