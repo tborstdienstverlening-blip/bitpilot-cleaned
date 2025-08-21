@@ -54,7 +54,7 @@ def _init_ai_state() -> None:
     ss.setdefault("ai_spend_usd", 0.00)      # month usage (UI-stub)
     ss.setdefault("ai_last_error", "")
     ss.setdefault("ai_uploader_key", 1)      # force reset file_uploader na verzenden
-    ss.setdefault("ai_pending_uploads", [])  # list[bytes] nog-niet-verzonden
+    ss.setdefault("ai_pending_uploads", [])  # list[bytes] (nog niet verzonden)
     ss.setdefault("ai_focus_again", False)   # hint om invoer te focussen na verzenden
 
 
@@ -107,14 +107,17 @@ def _settings_drawer() -> None:
 
 
 def _render_history_scrollable() -> None:
-    # Scrollbare container voor berichten (alleen de berichten scrollen — composer is sticky)
+    """
+    Scrollcontainer voor het volledige chatverloop; alleen dit blok scrolt.
+    De composer is sticky en beweegt dus niet mee.
+    """
     st.markdown(
         """
         <style>
         /* Scrollbare chatcontainer en sticky composer */
         .ai-chat-scroll {
-            min-height: 50vh;
-            max-height: calc(100vh - 220px);
+            min-height: 50vh;                     /* vaste kijkvenster-hoogte */
+            max-height: calc(100vh - 220px);      /* bovenkant UI tot net boven composer */
             overflow-y: auto;
             padding-right: .25rem;
         }
@@ -137,6 +140,8 @@ def _render_history_scrollable() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    # Messages-sectie (scrollcontainer)
     st.markdown('<div class="ai-chat-scroll">', unsafe_allow_html=True)
     for msg in st.session_state.ai_history:
         with st.chat_message(msg["role"]):
@@ -162,10 +167,15 @@ def _stub_answer(user_text: str) -> str:
 
 
 def _composer_sticky() -> Optional[str]:
-    """Sticky composer met uploader + text input; Enter=verzenden via st.form."""
+    """
+    Sticky composer-sectie (onderin). Bevat uploader + invoerveld + Send/Clear.
+    Enter = verzenden (via st.form + text_input). Shift+Enter (nieuwe regel) is
+    optioneel en niet geactiveerd in deze v1 (single-line input).
+    Returnt ingediende tekst (of None).
+    """
     can_send, guard_msg = _can_send_now()
 
-    # Sticky composer-blok
+    # Composer-container
     st.markdown('<div class="ai-composer">', unsafe_allow_html=True)
     left, right = st.columns([1, 3])
 
@@ -173,22 +183,24 @@ def _composer_sticky() -> Optional[str]:
     with left:
         st.caption("Screenshots")
         files = st.file_uploader(
-            " ",  # label hidden
+            " ",  # label verborgen
             type=["png", "jpg", "jpeg"],
             accept_multiple_files=True,
             key=f"ai_uploader_{st.session_state.ai_uploader_key}",
             label_visibility="collapsed",
+            help="Max 4 afbeeldingen per bericht.",
         )
-        # Sla selectie op in sessie (bytes), zodat we ze kunnen meesturen/previewen
+        # Verzamel bytes (max 4)
         pending: List[bytes] = []
         if files:
-            for f in files:
+            if len(files) > 4:
+                st.warning("Maximaal 4 afbeeldingen; extra bestanden worden genegeerd.")
+            for f in files[:4]:
                 pending.append(f.read())
-        # Als niets geüpload in deze run, behoud eventueel eerdere selectie
         if pending:
             st.session_state.ai_pending_uploads = pending
 
-        # Preview (voor verzenden)
+        # Preview vóór verzenden
         if st.session_state.ai_pending_uploads:
             st.caption("Preview")
             with st.container():
@@ -200,8 +212,13 @@ def _composer_sticky() -> Optional[str]:
     # ---- Invoer + knoppen ----
     submitted_text: Optional[str] = None
     with right:
+        # Form zorgt dat Enter het formulier verzendt (single-line input)
         with st.form("ai_compose_form", clear_on_submit=True):
-            txt = st.text_input("Je bericht", key="ai_compose_text", placeholder="Typ en druk Enter om te verzenden…")
+            txt = st.text_input(
+                "Je bericht",
+                key="ai_compose_text",
+                placeholder="Typ en druk Enter om te verzenden…",
+            )
             c1, c2, c3 = st.columns([1, 1, 3])
             send_btn = c1.form_submit_button("Send", disabled=not can_send, type="primary")
             clear_btn = c2.form_submit_button("Clear")
@@ -224,8 +241,9 @@ def _composer_sticky() -> Optional[str]:
 def render() -> None:
     """
     Hoofdentry voor de AI-tab.
-    Sticky composer onderin, scrollbare berichtencontainer, Enter=verzenden,
-    uploader zichtbaar en reset na verzenden.
+    - Messages-sectie: scrollcontainer (min 50vh).
+    - Composer-sectie: sticky onderin, altijd zichtbaar.
+    - Enter = verzenden; uploads reset na verzenden; focus behouden.
     """
     _init_ai_state()
 
@@ -238,7 +256,7 @@ def render() -> None:
     st.divider()
     submitted = _composer_sticky()
 
-    # ---- Verwerking van 'Send' ----
+    # ---- Verwerking na 'Send' ----
     if submitted is not None:
         try:
             # 1) user-bubble
@@ -277,13 +295,14 @@ def render() -> None:
         except Exception as e:
             st.session_state.ai_last_error = f"UI-fout: {e}"
 
-    # Auto-focus hint (best effort); geen extra deps
+    # Auto-focus na verzenden (best-effort, geen extra deps)
     if st.session_state.get("ai_focus_again"):
         st.session_state.ai_focus_again = False
         st.markdown(
             """
             <script>
             const tryFocus = () => {
+              // Zoek het invoerveld met label 'Je bericht'
               const labels = window.parent.document.querySelectorAll('label');
               for (const lb of labels) {
                 if (lb.textContent && lb.textContent.trim() === 'Je bericht') {
