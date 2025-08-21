@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
-
 import streamlit as st
 
 from utils.formatters import format_btc
@@ -48,6 +47,16 @@ def render(kpi: Dict[str, Any], start_btc: Optional[float]) -> None:
         )
 
 
-# Alias voor bestaande call-sites die mogelijk een andere naam gebruiken
-def render_kpi_bar(kpi: Dict[str, Any], start_btc: Optional[float]) -> None:
+def render_kpi_bar(a: Any, b: Any) -> None:
+    """
+    Backwards-compatible wrapper:
+    ondersteunt zowel (kpi, start_btc) als (start_btc, kpi).
+    """
+    if isinstance(a, dict) and not isinstance(b, dict):
+        kpi, start_btc = a, b
+    elif isinstance(b, dict) and not isinstance(a, dict):
+        kpi, start_btc = b, a
+    else:
+        # Fallback naar legacy volgorde (start_btc, kpi) zoals in cockpit.py
+        start_btc, kpi = a, b
     render(kpi, start_btc)
